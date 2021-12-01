@@ -162,3 +162,8 @@ bin/protoc-gen-go-grpc: bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION}
 bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION}:
 	@mkdir -p bin
 	curl -L https://github.com/grpc/grpc-go/releases/download/cmd%2Fprotoc-gen-go-grpc%2Fv${PROTOC_GEN_GO_GRPC_VERSION}/protoc-gen-go-grpc.v${PROTOC_GEN_GO_GRPC_VERSION}.${OS}.amd64.tar.gz | tar -zOxf - ./protoc-gen-go-grpc > ./bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION} && chmod +x ./bin/protoc-gen-go-grpc-${PROTOC_GEN_GO_GRPC_VERSION}
+
+dataos-image-build:
+	docker build -t "rubiklabs/dex:2.30.2_0.6" .
+dataos-image-push: dataos-image-build
+	docker push "rubiklabs/dex:2.30.2_0.6"
