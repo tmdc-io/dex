@@ -53,6 +53,8 @@ type Config struct {
 	GroupNameFormat      GroupNameFormat `json:"groupNameFormat"`
 	UseGroupsAsWhitelist bool            `json:"useGroupsAsWhitelist"`
 	EmailToLowercase     bool            `json:"emailToLowercase"`
+	Policy               string          `json:"policy"`
+	B2C                  bool            `json:"b2c"`
 
 	// PromptType is used for the prompt query parameter.
 	// For valid values, see https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-auth-code-flow#request-an-authorization-code.
@@ -75,7 +77,20 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		logger:               logger,
 		emailToLowercase:     c.EmailToLowercase,
 		promptType:           c.PromptType,
+		policy:               c.Policy,
+		b2C:                  c.B2C,
 	}
+
+	// Azure AD B2C requires tenant and policy names
+	if m.b2C {
+		if m.tenant == "" {
+			return nil, fmt.Errorf("invalid connector config: tenant is required for Azure AD B2C")
+		}
+		if m.policy == "" {
+			return nil, fmt.Errorf("invalid connector config: policy is required for Azure AD B2C")
+		}
+	}
+
 	// By default allow logins from both personal and business/school
 	// accounts.
 	if m.tenant == "" {
@@ -119,6 +134,8 @@ type microsoftConnector struct {
 	logger               log.Logger
 	emailToLowercase     bool
 	promptType           string
+	policy               string
+	b2C                  bool
 }
 
 func (c *microsoftConnector) isOrgTenant() bool {
@@ -139,15 +156,22 @@ func (c *microsoftConnector) oauth2Config(scopes connector.Scopes) *oauth2.Confi
 		microsoftScopes = append(microsoftScopes, scopeOfflineAccess)
 	}
 
+	endpoint := oauth2.Endpoint{}
+	if c.b2C {
+		// https://docs.microsoft.com/en-us/azure/active-directory-b2c/b2clogin
+		endpoint.AuthURL = "https://" + c.tenant + ".b2clogin.com/" + c.tenant + ".onmicrosoft.com/" + c.policy + "/oauth2/v2.0/authorize"
+		endpoint.TokenURL = "https://" + c.tenant + ".b2clogin.com/" + c.tenant + ".onmicrosoft.com/" + c.policy + "/oauth2/v2.0/token"
+	} else {
+		endpoint.AuthURL = c.apiURL + "/" + c.tenant + "/oauth2/v2.0/authorize"
+		endpoint.TokenURL = c.apiURL + "/" + c.tenant + "/oauth2/v2.0/token"
+	}
+
 	return &oauth2.Config{
 		ClientID:     c.clientID,
 		ClientSecret: c.clientSecret,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  c.apiURL + "/" + c.tenant + "/oauth2/v2.0/authorize",
-			TokenURL: c.apiURL + "/" + c.tenant + "/oauth2/v2.0/token",
-		},
-		Scopes:      microsoftScopes,
-		RedirectURL: c.redirectURI,
+		Endpoint:     endpoint,
+		Scopes:       microsoftScopes,
+		RedirectURL:  c.redirectURI,
 	}
 }
 
