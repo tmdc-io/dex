@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -61,10 +62,10 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 	ctx := context.Background()
 	azg, err := NewAzGraph(
 		"https://login.microsoftonline.com",
-		c.TenantId,
+		c.Tenant,
 		c.ClientID,
 		c.ClientSecret,
-		"dex/2.37.0-d4",
+		"dex/2.37.0-d5",
 		c.OnlySecurityGroups,
 		ctx,
 	)
@@ -100,10 +101,11 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		promptType:           c.PromptType,
 		policy:               c.Policy,
 		azg:                  azg,
+		tenantId:             c.TenantId,
 	}
 
 	// Azure AD B2C requires tenant and policy names
-	if m.tenant == "" {
+	if m.tenantId == "" {
 		return nil, fmt.Errorf("invalid connector config: tenant is required for Azure AD B2C")
 	}
 	if m.policy == "" {
@@ -150,6 +152,7 @@ type microsoftAADB2CConnector struct {
 	promptType           string
 	policy               string
 	azg                  *AzGraph
+	tenantId             string
 }
 
 func (c *microsoftAADB2CConnector) isOrgTenant() bool {
@@ -175,8 +178,8 @@ func (c *microsoftAADB2CConnector) oauth2Config(scopes connector.Scopes) *oauth2
 	// https://docs.microsoft.com/en-us/azure/active-directory-b2c/b2clogin
 	// https://tmdc0dataos0app.b2clogin.com/tmdc0dataos0app.onmicrosoft.com/b2c_1_default_signup_03_2022/oauth2/v2.0/authorize
 	endpoint := oauth2.Endpoint{
-		AuthURL:  "https://" + c.tenant + ".b2clogin.com/" + c.tenant + ".onmicrosoft.com/" + c.policy + "/oauth2/v2.0/authorize",
-		TokenURL: "https://" + c.tenant + ".b2clogin.com/" + c.tenant + ".onmicrosoft.com/" + c.policy + "/oauth2/v2.0/token",
+		AuthURL:  "https://" + c.tenantId + ".b2clogin.com/" + c.tenantId + ".onmicrosoft.com/" + c.policy + "/oauth2/v2.0/authorize",
+		TokenURL: "https://" + c.tenantId + ".b2clogin.com/" + c.tenantId + ".onmicrosoft.com/" + c.policy + "/oauth2/v2.0/token",
 	}
 
 	return &oauth2.Config{
@@ -324,17 +327,15 @@ func (c *microsoftAADB2CConnector) createIdentity(
 		return identity, "", fmt.Errorf("azure-ad-b2c: missing \"userName\" claim, not found \"%s\" key", userNameKey)
 	}
 
-	userIdKey := "signInName"
-	userId, found := claims[userIdKey].(string)
-	if !found {
-		return identity, "", fmt.Errorf("azure-ad-b2c: missing \"userId\" claim, not found \"%s\" key", userIdKey)
-	}
-
 	var email string
 	emailKey := "email"
 	email, found = claims[emailKey].(string)
 	if !found {
 		return identity, "", fmt.Errorf("azure-ad-b2c: missing \"email\" claim, not found \"%s\" key", emailKey)
+	}
+
+	if c.emailToLowercase {
+		email = strings.ToLower(email)
 	}
 
 	objIdKey := "objectId"
@@ -344,7 +345,7 @@ func (c *microsoftAADB2CConnector) createIdentity(
 	}
 
 	identity = connector.Identity{
-		UserID:        userId,
+		UserID:        objectId,
 		Username:      name,
 		Email:         email,
 		EmailVerified: true,

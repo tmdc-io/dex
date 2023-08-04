@@ -181,10 +181,10 @@ bin/kind:
 	@chmod +x ./bin/kind
 
 dataos-image-build:
-	docker build -t "rubiklabs/dex:2.37.0-d4" .
+	docker build -t "rubiklabs/dex:2.37.0-d7" .
 
 dataos-image-push: dataos-image-build
-	docker push "rubiklabs/dex:2.37.0-d4"
+	docker push "rubiklabs/dex:2.37.0-d7"
 
 ##@ Clean
 clean: ## Delete all builds and downloaded dependencies.
