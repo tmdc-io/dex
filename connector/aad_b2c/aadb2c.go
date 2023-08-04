@@ -64,7 +64,7 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		c.TenantId,
 		c.ClientID,
 		c.ClientSecret,
-		"dex/2.31.1_0.1",
+		"dex/2.37.0-d1",
 		c.OnlySecurityGroups,
 		ctx,
 	)
@@ -240,7 +240,8 @@ func (c *microsoftAADB2CConnector) HandleCallback(s connector.Scopes, r *http.Re
 			return identity, fmt.Errorf("azure-ad-b2c: get groups: failure retrieving groups for object id: %s", objectId)
 		}
 
-		var groups []string
+		var groupNames []string
+		var groupIds []string
 		for _, gn := range *g.Value {
 			group, err := c.azg.GetGroup(gn)
 			if err != nil {
@@ -251,11 +252,24 @@ func (c *microsoftAADB2CConnector) HandleCallback(s connector.Scopes, r *http.Re
 				continue
 			}
 			if group.DisplayName != nil {
-				groups = append(groups, *group.DisplayName)
+				groupNames = append(groupNames, *group.DisplayName)
+			}
+			if group.ObjectID != nil {
+				groupIds = append(groupIds, *group.ObjectID)
 			}
 		}
 
-		identity.Groups = groups
+		switch c.groupNameFormat {
+		case GroupName:
+			{
+				identity.Groups = groupNames
+			}
+		case GroupID:
+			{
+				identity.Groups = groupIds
+			}
+		}
+
 	}
 
 	if s.OfflineAccess {
