@@ -330,7 +330,7 @@ func (c *microsoftAADB2CConnector) createIdentity(
 	}
 
 	var email string
-	emailKey := "signInNames.emailAddress"
+	emailKey := "email"
 	email, found = claims[emailKey].(string)
 	if !found {
 		return identity, "", fmt.Errorf("azure-ad-b2c: missing \"email\" claim, not found \"%s\" key", emailKey)
