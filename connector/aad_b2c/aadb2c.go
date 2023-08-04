@@ -64,14 +64,15 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		c.TenantId,
 		c.ClientID,
 		c.ClientSecret,
-		"dex/2.37.0-d1",
+		"dex/2.37.0-d4",
 		c.OnlySecurityGroups,
 		ctx,
 	)
 	if err != nil {
 		return nil, err
 	}
-	issuer := "https://" + c.Tenant + ".b2clogin.com/" + c.Tenant + ".onmicrosoft.com/" + c.Policy + "/v2.0"
+	issuer := "https://" + c.TenantId + ".b2clogin.com/" + c.TenantId + ".onmicrosoft.com/" + c.Policy + "/v2.0/"
+	logger.Infof("azure-ad-b2c: issuer - %s", issuer)
 	ctx = oidc.InsecureIssuerURLContext(ctx, issuer)
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
