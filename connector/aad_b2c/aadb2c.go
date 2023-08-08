@@ -356,6 +356,9 @@ func (c *microsoftAADB2CConnector) createIdentity(
 
 // Refresh is used to refresh a session with the refresh token provided by the IdP
 func (c *microsoftAADB2CConnector) Refresh(ctx context.Context, s connector.Scopes, identity connector.Identity) (connector.Identity, error) {
+	if len(identity.ConnectorData) == 0 {
+		return identity, errors.New("azure-ad-b2c: no upstream access token found")
+	}
 	cd := connectorData{}
 	err := json.Unmarshal(identity.ConnectorData, &cd)
 	if err != nil {
