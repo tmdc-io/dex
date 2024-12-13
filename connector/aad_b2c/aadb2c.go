@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/dexidp/dex/connector"
-	"github.com/dexidp/dex/pkg/log"
 )
 
 // GroupNameFormat represents the format of the group identifier
@@ -58,7 +58,7 @@ type Config struct {
 }
 
 // Open returns a strategy for logging in through Microsoft.
-func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error) {
+func (c *Config) Open(id string, logger *slog.Logger) (connector.Connector, error) {
 	ctx := context.Background()
 	azg, err := NewAzGraph(
 		"https://login.microsoftonline.com",
@@ -73,7 +73,7 @@ func (c *Config) Open(id string, logger log.Logger) (connector.Connector, error)
 		return nil, err
 	}
 	issuer := "https://" + c.TenantId + ".b2clogin.com/" + c.TenantId + ".onmicrosoft.com/" + c.Policy + "/v2.0/"
-	logger.Infof("azure-ad-b2c: issuer - %s", issuer)
+	logger.Info(fmt.Sprintf("azure-ad-b2c: issuer - %s", issuer))
 	ctx = oidc.InsecureIssuerURLContext(ctx, issuer)
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
@@ -147,7 +147,7 @@ type microsoftAADB2CConnector struct {
 	groupNameFormat      GroupNameFormat
 	groups               []string
 	useGroupsAsWhitelist bool
-	logger               log.Logger
+	logger               *slog.Logger
 	emailToLowercase     bool
 	promptType           string
 	policy               string
@@ -249,7 +249,7 @@ func (c *microsoftAADB2CConnector) HandleCallback(s connector.Scopes, r *http.Re
 		for _, gn := range *g.Value {
 			group, err := c.azg.GetGroup(gn)
 			if err != nil {
-				c.logger.Warnf("azure-ad-b2c: failure getting group %s, continuing: %s", gn, err.Error())
+				c.logger.Warn(fmt.Sprintf("azure-ad-b2c: failure getting group %s, continuing: %s", gn, err.Error()))
 				continue
 			}
 			if group == nil {
