@@ -183,15 +183,15 @@ bin/kind:
 	@chmod +x ./bin/kind
 
 dataos-image-build:
-	docker build -t "rubiklabs/dex:2.37.0-d7" .
+	docker build -t "rubiklabs/dex:2.41.1-d1" .
 
 dataos-image-push: dataos-image-build
-	docker push "rubiklabs/dex:2.37.0-d7"
+	docker push "rubiklabs/dex:2.41.1-d1"
 
 docker-buildx-push:
 	@echo
 	@echo "=== docker buildx push ==="
-	docker buildx build --sbom=true --provenance=true -t "rubiklabs/dex:2.37.0-d8" . --platform linux/amd64 --push
+	docker buildx build --sbom=true --provenance=true -t "rubiklabs/dex:2.41.1-d1" . --platform linux/amd64 --push
 
 ##@ Clean
 clean: ## Delete all builds and downloaded dependencies.
