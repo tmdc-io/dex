@@ -113,7 +113,7 @@ func getAuthorizerForResource(
 
 }
 
-//TODO: medium - include additional configuration settings
+// TODO: medium - include additional configuration settings
 func getClientCredentials(
 	adEndpoint,
 	tenantId,
