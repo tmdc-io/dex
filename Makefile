@@ -182,15 +182,15 @@ bin/kind:
 	@chmod +x ./bin/kind
 
 dataos-image-build:
-	docker build -t "tmdcio/dex:2.41.1-d1" .
+	docker build -t "tmdcio/dex:2.42.1-d2" .
 
 dataos-image-push: dataos-image-build
-	docker push "tmdcio/dex:2.41.1-d1"
+	docker push "tmdcio/dex:2.42.1-d2"
 
 docker-buildx-push:
 	@echo
 	@echo "=== docker buildx push ==="
-	docker buildx build --sbom=true --provenance=true -t "tmdcio/dex:2.41.1-d1" . --platform linux/amd64 --push
+	docker buildx build --sbom=true --provenance=true -t "tmdcio/dex:2.42.1-d2" . --platform linux/amd64 --push
 
 ##@ Clean
 clean: ## Delete all builds and downloaded dependencies.

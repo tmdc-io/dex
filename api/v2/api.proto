@@ -27,6 +27,14 @@ message GetClientResp {
   Client client = 1;
 }
 
+// ListClientsReq empty request
+message ListClientsReq {}
+
+// ListClientsResp returns the list of client details.
+message ListClientsResp {
+  repeated Client client = 1;
+}
+
 // CreateClientReq is a request to make a client.
 message CreateClientReq {
   Client client = 1;
@@ -247,6 +255,8 @@ message VerifyPasswordResp {
 service Dex {
   // GetClient gets a client.
   rpc GetClient(GetClientReq) returns (GetClientResp) {};
+  // ListClients gets a client.
+  rpc ListClients(ListClientsReq) returns (ListClientsResp) {};
   // CreateClient creates a client.
   rpc CreateClient(CreateClientReq) returns (CreateClientResp) {};
   // UpdateClient updates an existing client

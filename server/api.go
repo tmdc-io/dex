@@ -69,6 +69,29 @@ func (d dexAPI) GetClient(ctx context.Context, req *api.GetClientReq) (*api.GetC
 	}, nil
 }
 
+func (d dexAPI) ListClients(ctx context.Context, req *api.ListClientsReq) (*api.ListClientsResp, error) {
+	cl, err := d.s.ListClients(ctx)
+	if err != nil {
+		d.logger.Error("failed to list clients", "err", err)
+		return nil, fmt.Errorf("list clients: %v", err)
+	}
+	clients := make([]*api.Client, 0, len(cl))
+	for _, cl := range cl {
+		clients = append(clients, &api.Client{
+			Id:           cl.ID,
+			Name:         cl.Name,
+			Secret:       cl.Secret,
+			RedirectUris: cl.RedirectURIs,
+			TrustedPeers: cl.TrustedPeers,
+			Public:       cl.Public,
+			LogoUrl:      cl.LogoURL,
+		})
+	}
+	return &api.ListClientsResp{
+		Client: clients,
+	}, nil
+}
+
 func (d dexAPI) CreateClient(ctx context.Context, req *api.CreateClientReq) (*api.CreateClientResp, error) {
 	if req.Client == nil {
 		return nil, errors.New("no client supplied")
