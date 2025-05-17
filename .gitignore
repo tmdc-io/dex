@@ -6,3 +6,5 @@
 /var/
 /vendor/
 /examples/*.yaml
+/examples/certs/
+.DS_Store
