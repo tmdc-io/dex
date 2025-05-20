@@ -218,10 +218,9 @@ func runServe(options serveOptions) error {
 				}
 				c.StaticClients[i].ID = os.Getenv(client.IDEnv)
 			}
-			// Commenting this out since the oidc-js libs do not support a secret
-			// if client.Secret == "" && client.SecretEnv == "" && !client.Public {
-			// 	return fmt.Errorf("invalid config: Secret or SecretEnv field is required for client %q", client.ID)
-			// }
+			if client.Secret == "" && client.SecretEnv == "" && !client.Public {
+				return fmt.Errorf("invalid config: Secret or SecretEnv field is required for client %q", client.ID)
+			}
 			if client.SecretEnv != "" {
 				if client.Secret != "" {
 					return fmt.Errorf("invalid config: Secret and SecretEnv fields are exclusive for client %q", client.ID)
