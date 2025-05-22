@@ -447,10 +447,8 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 	// Handle the root path for the better user experience.
 	handleWithCORS("/", func(w http.ResponseWriter, r *http.Request) {
 		_, err := fmt.Fprintf(w, `<!DOCTYPE html>
-			<title>Dex</title>
-			<h1>Dex IdP</h1>
-			<h3>A Federated OpenID Connect Provider</h3>
-			<p><a href=%q>Discovery</a></p>`,
+			<title>OIDC</title>
+			<p><a href=%q>oidc discovery</a></p>`,
 			s.issuerURL.String()+"/.well-known/openid-configuration")
 		if err != nil {
 			s.logger.Error("failed to write response", "err", err)

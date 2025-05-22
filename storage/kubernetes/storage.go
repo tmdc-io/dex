@@ -368,8 +368,16 @@ func (cli *client) GetConnector(ctx context.Context, id string) (storage.Connect
 	return toStorageConnector(c), nil
 }
 
-func (cli *client) ListClients(ctx context.Context) ([]storage.Client, error) {
-	return nil, errors.New("not implemented")
+func (cli *client) ListClients(ctx context.Context) (clients []storage.Client, err error) {
+	var clientList ClientList
+	if err = cli.list(resourceClient, &clientList); err != nil {
+		return nil, fmt.Errorf("failed to list clients: %v", err)
+	}
+	clients = make([]storage.Client, len(clientList.Clients))
+	for i, client := range clientList.Clients {
+		clients[i] = toStorageClient(client)
+	}
+	return
 }
 
 func (cli *client) ListRefreshTokens(ctx context.Context) ([]storage.RefreshToken, error) {
