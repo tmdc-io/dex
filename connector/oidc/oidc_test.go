@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/dexidp/dex/connector"
 )
@@ -65,6 +66,9 @@ func TestHandleCallback(t *testing.T) {
 		token                     map[string]interface{}
 		groupsRegex               string
 		newGroupFromClaims        []NewGroupFromClaims
+		groupsPrefix              string
+		groupsSuffix              string
+		pkceChallenge             string
 	}{
 		{
 			name:               "simpleCase",
@@ -397,6 +401,58 @@ func TestHandleCallback(t *testing.T) {
 			},
 		},
 		{
+			name:               "prefixGroupNames",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"prefix-group1", "prefix-group2", "prefix-groupA", "prefix-groupB"},
+			expectedEmailField: "emailvalue",
+			groupsPrefix:       "prefix-",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "suffixGroupNames",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1-suffix", "group2-suffix", "groupA-suffix", "groupB-suffix"},
+			expectedEmailField: "emailvalue",
+			groupsSuffix:       "-suffix",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "preAndSuffixGroupNames",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"prefix-group1-suffix", "prefix-group2-suffix", "prefix-groupA-suffix", "prefix-groupB-suffix"},
+			expectedEmailField: "emailvalue",
+			groupsPrefix:       "prefix-",
+			groupsSuffix:       "-suffix",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2", "groupA", "groupB"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
 			name:               "filterGroupClaims",
 			userIDKey:          "", // not configured
 			userNameKey:        "", // not configured
@@ -426,6 +482,40 @@ func TestHandleCallback(t *testing.T) {
 				"sub":            "subvalue",
 				"name":           "namevalue",
 				"groups":         []map[string]string{{"name": "group1"}, {"name": "group2"}, {"name": "groupA"}, {"name": "groupB"}},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "S256PKCEChallenge",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			pkceChallenge:      "S256",
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2"},
+				"email":          "emailvalue",
+				"email_verified": true,
+			},
+		},
+		{
+			name:               "plainPKCEChallenge",
+			userIDKey:          "", // not configured
+			userNameKey:        "", // not configured
+			pkceChallenge:      "plain",
+			expectUserID:       "subvalue",
+			expectUserName:     "namevalue",
+			expectGroups:       []string{"group1", "group2"},
+			expectedEmailField: "emailvalue",
+			token: map[string]interface{}{
+				"sub":            "subvalue",
+				"name":           "namevalue",
+				"groups":         []string{"group1", "group2"},
 				"email":          "emailvalue",
 				"email_verified": true,
 			},
@@ -461,12 +551,15 @@ func TestHandleCallback(t *testing.T) {
 				InsecureEnableGroups:      true,
 				BasicAuthUnsupported:      &basicAuth,
 				OverrideClaimMapping:      tc.overrideClaimMapping,
+				PKCEChallenge:             tc.pkceChallenge,
 			}
 			config.ClaimMapping.PreferredUsernameKey = tc.preferredUsernameKey
 			config.ClaimMapping.EmailKey = tc.emailKey
 			config.ClaimMapping.GroupsKey = tc.groupsKey
 			config.ClaimMutations.NewGroupFromClaims = tc.newGroupFromClaims
 			config.ClaimMutations.FilterGroupClaims.GroupsFilter = tc.groupsRegex
+			config.ClaimMutations.ModifyGroupNames.Prefix = tc.groupsPrefix
+			config.ClaimMutations.ModifyGroupNames.Suffix = tc.groupsSuffix
 
 			conn, err := newConnector(config)
 			if err != nil {
@@ -478,7 +571,11 @@ func TestHandleCallback(t *testing.T) {
 				t.Fatal("failed to create request", err)
 			}
 
-			identity, err := conn.HandleCallback(connector.Scopes{Groups: true}, req)
+			connectorDataStrTemplate := `{"codeChallenge":"abcdefgh123456qwertuiop89101112uvpwizABC234","codeChallengeMethod":"%s"}`
+			connectorDataStr := fmt.Sprintf(connectorDataStrTemplate, config.PKCEChallenge)
+			connectorData := []byte(connectorDataStr)
+
+			identity, err := conn.HandleCallback(connector.Scopes{Groups: true}, connectorData, req)
 			if err != nil {
 				t.Fatal("handle callback failed", err)
 			}
@@ -736,6 +833,42 @@ func TestProviderOverride(t *testing.T) {
 			t.Fatalf("unexpected token URL: %s, expected: %s\n", conn.provider.Endpoint().TokenURL, expToken)
 		}
 	})
+
+	t.Run("Override userinfo and device auth URLs", func(t *testing.T) {
+		// A second server whose userinfo endpoint returns a distinct subject,
+		// so we can prove the overridden endpoint (not the discovery default)
+		// is the one actually used.
+		overrideServer, err := setupServer(map[string]any{"sub": "override-sub"}, true)
+		if err != nil {
+			t.Fatal("failed to setup override server", err)
+		}
+		defer overrideServer.Close()
+
+		conn, err := newConnector(Config{
+			Issuer: testServer.URL,
+			Scopes: []string{"openid", "groups"},
+			ProviderDiscoveryOverrides: ProviderDiscoveryOverrides{
+				DeviceAuthURL: "/test-device",
+				UserInfoURL:   fmt.Sprintf("%s/userinfo", overrideServer.URL),
+			},
+		})
+		if err != nil {
+			t.Fatal("failed to create new connector", err)
+		}
+
+		expDevice := "/test-device"
+		if conn.provider.Endpoint().DeviceAuthURL != expDevice {
+			t.Fatalf("unexpected device auth URL: %s, expected: %s\n", conn.provider.Endpoint().DeviceAuthURL, expDevice)
+		}
+
+		userInfo, err := conn.provider.UserInfo(context.Background(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "sometoken"}))
+		if err != nil {
+			t.Fatal("failed to call UserInfo", err)
+		}
+		if userInfo.Subject != "override-sub" {
+			t.Fatalf("UserInfo did not use the overridden endpoint: got subject %q, expected %q", userInfo.Subject, "override-sub")
+		}
+	})
 }
 
 func setupServer(tok map[string]interface{}, idTokenDesired bool) (*httptest.Server, error) {
@@ -879,4 +1012,109 @@ func expectEquals(t *testing.T, a interface{}, b interface{}) {
 	if !reflect.DeepEqual(a, b) {
 		t.Errorf("Expected %+v to equal %+v", a, b)
 	}
+}
+
+func TestLogoutURL(t *testing.T) {
+	tests := []struct {
+		name                  string
+		endSessionURL         string
+		postLogoutRedirectURI string
+		wantURL               string
+		wantEmpty             bool
+	}{
+		{
+			name:          "no end_session_endpoint",
+			endSessionURL: "",
+			wantEmpty:     true,
+		},
+		{
+			name:          "with end_session_endpoint, no redirect",
+			endSessionURL: "https://provider.example.com/logout",
+			wantURL:       "https://provider.example.com/logout",
+		},
+		{
+			name:                  "with end_session_endpoint and redirect",
+			endSessionURL:         "https://provider.example.com/logout",
+			postLogoutRedirectURI: "https://dex.example.com/logout/callback",
+			wantURL:               "https://provider.example.com/logout?client_id=clientID&post_logout_redirect_uri=https%3A%2F%2Fdex.example.com%2Flogout%2Fcallback",
+		},
+		{
+			name:                  "with existing query params",
+			endSessionURL:         "https://provider.example.com/logout?existing=param",
+			postLogoutRedirectURI: "https://dex.example.com/callback",
+			wantURL:               "https://provider.example.com/logout?client_id=clientID&existing=param&post_logout_redirect_uri=https%3A%2F%2Fdex.example.com%2Fcallback",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &oidcConnector{
+				endSessionURL: tc.endSessionURL,
+				oauth2Config: &oauth2.Config{
+					ClientID: "clientID",
+				},
+			}
+
+			got, err := conn.LogoutURL(context.Background(), tc.postLogoutRedirectURI)
+			require.NoError(t, err)
+
+			if tc.wantEmpty {
+				require.Empty(t, got)
+				return
+			}
+
+			require.Equal(t, tc.wantURL, got)
+		})
+	}
+}
+
+func TestEndSessionURLDiscovery(t *testing.T) {
+	// Setup a server that advertises end_session_endpoint in discovery.
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(&map[string]interface{}{
+			"keys": []map[string]interface{}{},
+		})
+	})
+
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		url := fmt.Sprintf("http://%s", r.Host)
+		json.NewEncoder(w).Encode(&map[string]string{
+			"issuer":                 url,
+			"token_endpoint":         fmt.Sprintf("%s/token", url),
+			"authorization_endpoint": fmt.Sprintf("%s/authorize", url),
+			"jwks_uri":               fmt.Sprintf("%s/keys", url),
+			"end_session_endpoint":   fmt.Sprintf("%s/logout", url),
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_ = key // We only need the server for discovery.
+
+	conn, err := newConnector(Config{
+		Issuer: ts.URL,
+		Scopes: []string{"openid"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%s/logout", ts.URL), conn.endSessionURL)
+}
+
+func TestEndSessionURLOverride(t *testing.T) {
+	testServer, err := setupServer(nil, true)
+	require.NoError(t, err)
+	defer testServer.Close()
+
+	conn, err := newConnector(Config{
+		Issuer: testServer.URL,
+		Scopes: []string{"openid"},
+		ProviderDiscoveryOverrides: ProviderDiscoveryOverrides{
+			EndSessionURL: "https://custom.example.com/logout",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://custom.example.com/logout", conn.endSessionURL)
 }
