@@ -1,5 +1,5 @@
-//go:build go1.11
-// +build go1.11
+//go:build go1.26
+// +build go1.26
 
 package sql
 
