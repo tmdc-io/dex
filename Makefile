@@ -17,7 +17,7 @@ export GOBIN=$(PWD)/bin
 LD_FLAGS="-w -X main.version=$(VERSION)"
 
 # Dependency versions
-GOLANGCI_VERSION   = 1.64.5
+GOLANGCI_VERSION   = 2.4.0
 GOTESTSUM_VERSION ?= 1.12.0
 
 PROTOC_VERSION             = 29.3
@@ -34,6 +34,10 @@ KIND_TMP_DIR    = "$(PWD)/bin/test/dex-kind-kubeconfig"
 build: bin/dex ## Build Dex binaries.
 
 examples: bin/grpc-client bin/example-app ## Build example app.
+
+.PHONY: update-gomplate
+update-gomplate: ## Check and update gomplate version in Dockerfile.
+	@./scripts/update-gomplate
 
 .PHONY: release-binary
 release-binary: LD_FLAGS = "-w -X main.version=$(VERSION) -extldflags \"-static\""
@@ -123,16 +127,32 @@ verify-go-mod: go-mod-tidy ## Check that go.mod and go.sum formatted according t
 
 deps: bin/gotestsum bin/golangci-lint bin/protoc bin/protoc-gen-go bin/protoc-gen-go-grpc bin/kind ## Install dev dependencies.
 
-.PHONY: test testrace testall
-test: ## Test go code.
-	@go test -v ./...
+# Detect if we're running in GitHub Actions
+ifdef GITHUB_ACTIONS
+GOTESTSUM_FORMAT = github-actions
+else
+GOTESTSUM_FORMAT = testname
+GOTESTSUM_FORMAT_ICONS = hivis
+endif
 
-testrace: ## Test go code and check for possible race conditions.
-	@go test -v --race ./...
+.PHONY: test testrace testall
+test: bin/gotestsum ## Test go code.
+ifdef GOTESTSUM_FORMAT_ICONS
+	@gotestsum --format $(GOTESTSUM_FORMAT) --format-icons $(GOTESTSUM_FORMAT_ICONS) -- -v ./...
+else
+	@gotestsum --format $(GOTESTSUM_FORMAT) -- -v ./...
+endif
+
+testrace: bin/gotestsum ## Test go code and check for possible race conditions.
+ifdef GOTESTSUM_FORMAT_ICONS
+	@gotestsum --format $(GOTESTSUM_FORMAT) --format-icons $(GOTESTSUM_FORMAT_ICONS) -- -v --race ./...
+else
+	@gotestsum --format $(GOTESTSUM_FORMAT) -- -v --race ./...
+endif
 
 testall: testrace ## Run all tests for go code.
 
-.PHONY: lint lint-fix
+.PHONY: lint
 lint: ## Run linter.
 	@golangci-lint version
 	@golangci-lint run
@@ -140,7 +160,7 @@ lint: ## Run linter.
 .PHONY: fix
 fix: ## Fix lint violations.
 	@golangci-lint version
-	@golangci-lint run --fix
+	@golangci-lint fmt
 
 docker-compose.override.yaml:
 	cp docker-compose.override.yaml.dist docker-compose.override.yaml

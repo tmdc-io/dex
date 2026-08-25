@@ -57,7 +57,7 @@ func (s *StorageTestSuite) SetupTest() {
 		KubeConfigFile: kubeconfigPath,
 	}
 
-	logger := slog.New(slog.DiscardHandler)
+	logger := slog.New(slog.NewTextHandler(s.T().Output(), &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	kubeClient, err := config.open(logger, true)
 	s.Require().NoError(err)
@@ -66,7 +66,7 @@ func (s *StorageTestSuite) SetupTest() {
 }
 
 func (s *StorageTestSuite) TestStorage() {
-	newStorage := func() storage.Storage {
+	newStorage := func(t *testing.T) storage.Storage {
 		for _, resource := range []string{
 			resourceAuthCode,
 			resourceAuthRequest,
@@ -85,6 +85,7 @@ func (s *StorageTestSuite) TestStorage() {
 	}
 
 	conformance.RunTests(s.T(), newStorage)
+	conformance.RunConcurrencyTests(s.T(), newStorage)
 	conformance.RunTransactionTests(s.T(), newStorage)
 }
 
