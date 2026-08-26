@@ -2,16 +2,19 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
-	"net/http"
 	"strings"
 	"time"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/dexidp/dex/storage"
-	"github.com/dexidp/dex/storage/kubernetes/k8sapi"
 )
 
 const (
@@ -57,8 +60,10 @@ const (
 
 // Config values for the Kubernetes storage type.
 type Config struct {
-	InCluster      bool   `json:"inCluster"`
-	KubeConfigFile string `json:"kubeConfigFile"`
+	InCluster      bool    `json:"inCluster"`
+	KubeConfigFile string  `json:"kubeConfigFile"`
+	Qps            float32 `json:"qps"`
+	Burst          int     `json:"burst"`
 	// CRDHandling controls how the storage handles Custom Resource Definitions (CRDs).
 	// Supported values:
 	// - "ensure": Attempt to create all missing CRDs. If any CRD creation fails, initialization fails. (default)
@@ -76,7 +81,10 @@ func (c *Config) Open(logger *slog.Logger) (storage.Storage, error) {
 //
 // waitForResources controls if errors creating the resources cause this method to return
 // immediately (used during testing), or if the client will asynchronously retry.
-func (c *Config) open(logger *slog.Logger, waitForResources bool) (*client, error) {
+func (c *Config) open(
+	logger *slog.Logger,
+	waitForResources bool,
+) (*client, error) {
 	if c.CRDHandling == "" {
 		c.CRDHandling = crdHandlingEnsure
 	}
@@ -87,31 +95,37 @@ func (c *Config) open(logger *slog.Logger, waitForResources bool) (*client, erro
 		return nil, errors.New("must specify either 'inCluster' or 'kubeConfigFile'")
 	}
 
-	var (
-		cluster   k8sapi.Cluster
-		user      k8sapi.AuthInfo
-		namespace string
-		err       error
-	)
-	if c.InCluster {
-		cluster, user, namespace, err = inClusterConfig()
-	} else {
-		cluster, user, namespace, err = loadKubeConfig(c.KubeConfigFile)
-	}
+	cluster, user, namespace, err := func() (Cluster, AuthInfo, string, error) {
+		if c.InCluster {
+			return inClusterConfig()
+		}
+		return loadKubeConfig(c.KubeConfigFile)
+	}()
 	if err != nil {
 		return nil, err
 	}
-
-	cli, err := newClient(cluster, user, namespace, logger, c.InCluster, c.CRDHandling)
+	if c.Qps == 0 {
+		c.Qps = 1000
+	}
+	if c.Burst == 0 {
+		c.Burst = 2000
+	}
+	cli, err := newClient(
+		cluster, user, namespace, logger, c.InCluster, c.CRDHandling, c.Qps, c.Burst,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create client: %v", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// If the client is closed, stop trying to create resources.
+	cli.ctx = ctx
+	cli.cancel = cancel
+
 	if err = cli.detectKubernetesVersion(); err != nil {
 		return nil, fmt.Errorf("cannot get kubernetes version: %v", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
 
 	logger.Info("creating custom Kubernetes resources")
 	if !cli.registerCustomResources() {
@@ -145,8 +159,6 @@ func (c *Config) open(logger *slog.Logger, waitForResources bool) (*client, erro
 		}
 	}
 
-	// If the client is closed, stop trying to create resources.
-	cli.cancel = cancel
 	return cli, nil
 }
 
@@ -160,15 +172,15 @@ func (cli *client) registerCustomResources() bool {
 	definitions := customResourceDefinitions(cli.crdAPIVersion)
 
 	// First pass: collect all CRDs that don't exist
-	var missingCRDs []k8sapi.CustomResourceDefinition
+	var missingCRDs []CustomResourceDefinition
 
 	for _, r := range definitions {
-		var i interface{}
-		cli.logger.Info("checking if custom resource has already been created...", "object", r.ObjectMeta.Name)
-		if err := cli.listN(r.Spec.Names.Plural, &i, 1); err == nil {
-			cli.logger.Info("the custom resource already available, skipping create", "object", r.ObjectMeta.Name)
+		var i any
+		cli.logger.Info("checking if custom resource has already been created...", "object", r.Name)
+		if err := cli.listN(cli.ctx, r.Spec.Names.Plural, &i, 1); err == nil {
+			cli.logger.Info("the custom resource already available, skipping create", "object", r.Name)
 		} else {
-			cli.logger.Info("custom resource not found", "object", r.ObjectMeta.Name, "err", err)
+			cli.logger.Info("custom resource not found", "object", r.Name, "err", err)
 			missingCRDs = append(missingCRDs, r)
 		}
 	}
@@ -184,8 +196,8 @@ func (cli *client) registerCustomResources() bool {
 		case crdHandlingEnsure:
 			cli.logger.Info("crdHandling is 'ensure', attempting to create missing CRDs")
 			for _, r := range missingCRDs {
-				resourceName := r.ObjectMeta.Name
-				err := cli.postResource(cli.crdAPIVersion, "", "customresourcedefinitions", r)
+				resourceName := r.Name
+				err := cli.postResource(cli.ctx, cli.crdAPIVersion, "", "customresourcedefinitions", r)
 				if err != nil {
 					if !errors.Is(err, storage.ErrAlreadyExists) {
 						cli.logger.Error("failed to create custom resource", "object", resourceName, "err", err)
@@ -234,15 +246,28 @@ func (cli *client) waitForCRDs(ctx context.Context) error {
 
 // isCRDReady determines if a CRD is ready by inspecting its conditions.
 func (cli *client) isCRDReady(name string) error {
-	var r k8sapi.CustomResourceDefinition
-	err := cli.getResource(cli.crdAPIVersion, "", "customresourcedefinitions", name, &r)
+	gv, err := schema.ParseGroupVersion(cli.crdAPIVersion)
+	if err != nil {
+		return err
+	}
+	resourceInterface := cli.dynamic.Resource(gv.WithResource("customresourcedefinitions"))
+	unstructured, err := resourceInterface.Get(cli.ctx, name, v1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("get crd %s: %v", name, err)
 	}
 
+	raw, err := unstructured.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	var r CustomResourceDefinition
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return err
+	}
+
 	conds := make(map[string]string) // For debugging, keep the conditions around.
 	for _, c := range r.Status.Conditions {
-		if c.Type == k8sapi.Established && c.Status == k8sapi.ConditionTrue {
+		if c.Type == Established && c.Status == ConditionTrue {
 			return nil
 		}
 		conds[string(c.Type)] = string(c.Status)
@@ -251,43 +276,40 @@ func (cli *client) isCRDReady(name string) error {
 }
 
 func (cli *client) Close() error {
-	if cli.cancel != nil {
-		cli.cancel()
-	}
 	return nil
 }
 
 func (cli *client) CreateAuthRequest(ctx context.Context, a storage.AuthRequest) error {
-	return cli.post(resourceAuthRequest, cli.fromStorageAuthRequest(a))
+	return cli.post(ctx, resourceAuthRequest, cli.fromStorageAuthRequest(a))
 }
 
 func (cli *client) CreateClient(ctx context.Context, c storage.Client) error {
-	return cli.post(resourceClient, cli.fromStorageClient(c))
+	return cli.post(ctx, resourceClient, cli.fromStorageClient(c))
 }
 
 func (cli *client) CreateAuthCode(ctx context.Context, c storage.AuthCode) error {
-	return cli.post(resourceAuthCode, cli.fromStorageAuthCode(c))
+	return cli.post(ctx, resourceAuthCode, cli.fromStorageAuthCode(c))
 }
 
 func (cli *client) CreatePassword(ctx context.Context, p storage.Password) error {
-	return cli.post(resourcePassword, cli.fromStoragePassword(p))
+	return cli.post(ctx, resourcePassword, cli.fromStoragePassword(p))
 }
 
 func (cli *client) CreateRefresh(ctx context.Context, r storage.RefreshToken) error {
-	return cli.post(resourceRefreshToken, cli.fromStorageRefreshToken(r))
+	return cli.post(ctx, resourceRefreshToken, cli.fromStorageRefreshToken(r))
 }
 
 func (cli *client) CreateOfflineSessions(ctx context.Context, o storage.OfflineSessions) error {
-	return cli.post(resourceOfflineSessions, cli.fromStorageOfflineSessions(o))
+	return cli.post(ctx, resourceOfflineSessions, cli.fromStorageOfflineSessions(o))
 }
 
 func (cli *client) CreateConnector(ctx context.Context, c storage.Connector) error {
-	return cli.post(resourceConnector, cli.fromStorageConnector(c))
+	return cli.post(ctx, resourceConnector, cli.fromStorageConnector(c))
 }
 
 func (cli *client) GetAuthRequest(ctx context.Context, id string) (storage.AuthRequest, error) {
 	var req AuthRequest
-	if err := cli.get(resourceAuthRequest, id, &req); err != nil {
+	if err := cli.get(ctx, resourceAuthRequest, id, &req); err != nil {
 		return storage.AuthRequest{}, err
 	}
 	return toStorageAuthRequest(req), nil
@@ -295,24 +317,24 @@ func (cli *client) GetAuthRequest(ctx context.Context, id string) (storage.AuthR
 
 func (cli *client) GetAuthCode(ctx context.Context, id string) (storage.AuthCode, error) {
 	var code AuthCode
-	if err := cli.get(resourceAuthCode, id, &code); err != nil {
+	if err := cli.get(ctx, resourceAuthCode, id, &code); err != nil {
 		return storage.AuthCode{}, err
 	}
 	return toStorageAuthCode(code), nil
 }
 
 func (cli *client) GetClient(ctx context.Context, id string) (storage.Client, error) {
-	c, err := cli.getClient(id)
+	c, err := cli.getClient(ctx, id)
 	if err != nil {
 		return storage.Client{}, err
 	}
 	return toStorageClient(c), nil
 }
 
-func (cli *client) getClient(id string) (Client, error) {
+func (cli *client) getClient(ctx context.Context, id string) (Client, error) {
 	var c Client
 	name := cli.idToName(id)
-	if err := cli.get(resourceClient, name, &c); err != nil {
+	if err := cli.get(ctx, resourceClient, name, &c); err != nil {
 		return Client{}, err
 	}
 	if c.ID != id {
@@ -322,19 +344,19 @@ func (cli *client) getClient(id string) (Client, error) {
 }
 
 func (cli *client) GetPassword(ctx context.Context, email string) (storage.Password, error) {
-	p, err := cli.getPassword(email)
+	p, err := cli.getPassword(ctx, email)
 	if err != nil {
 		return storage.Password{}, err
 	}
 	return toStoragePassword(p), nil
 }
 
-func (cli *client) getPassword(email string) (Password, error) {
+func (cli *client) getPassword(ctx context.Context, email string) (Password, error) {
 	// TODO(ericchiang): Figure out whose job it is to lowercase emails.
 	email = strings.ToLower(email)
 	var p Password
 	name := cli.idToName(email)
-	if err := cli.get(resourcePassword, name, &p); err != nil {
+	if err := cli.get(ctx, resourcePassword, name, &p); err != nil {
 		return Password{}, err
 	}
 	if email != p.Email {
@@ -345,36 +367,36 @@ func (cli *client) getPassword(email string) (Password, error) {
 
 func (cli *client) GetKeys(ctx context.Context) (storage.Keys, error) {
 	var keys Keys
-	if err := cli.get(resourceKeys, keysName, &keys); err != nil {
+	if err := cli.get(ctx, resourceKeys, keysName, &keys); err != nil {
 		return storage.Keys{}, err
 	}
 	return toStorageKeys(keys), nil
 }
 
 func (cli *client) GetRefresh(ctx context.Context, id string) (storage.RefreshToken, error) {
-	r, err := cli.getRefreshToken(id)
+	r, err := cli.getRefreshToken(ctx, id)
 	if err != nil {
 		return storage.RefreshToken{}, err
 	}
 	return toStorageRefreshToken(r), nil
 }
 
-func (cli *client) getRefreshToken(id string) (r RefreshToken, err error) {
-	err = cli.get(resourceRefreshToken, id, &r)
+func (cli *client) getRefreshToken(ctx context.Context, id string) (r RefreshToken, err error) {
+	err = cli.get(ctx, resourceRefreshToken, id, &r)
 	return
 }
 
 func (cli *client) GetOfflineSessions(ctx context.Context, userID string, connID string) (storage.OfflineSessions, error) {
-	o, err := cli.getOfflineSessions(userID, connID)
+	o, err := cli.getOfflineSessions(ctx, userID, connID)
 	if err != nil {
 		return storage.OfflineSessions{}, err
 	}
 	return toStorageOfflineSessions(o), nil
 }
 
-func (cli *client) getOfflineSessions(userID string, connID string) (o OfflineSessions, err error) {
+func (cli *client) getOfflineSessions(ctx context.Context, userID string, connID string) (o OfflineSessions, err error) {
 	name := cli.offlineTokenName(userID, connID)
-	if err = cli.get(resourceOfflineSessions, name, &o); err != nil {
+	if err = cli.get(ctx, resourceOfflineSessions, name, &o); err != nil {
 		return OfflineSessions{}, err
 	}
 	if userID != o.UserID || connID != o.ConnID {
@@ -385,7 +407,7 @@ func (cli *client) getOfflineSessions(userID string, connID string) (o OfflineSe
 
 func (cli *client) GetConnector(ctx context.Context, id string) (storage.Connector, error) {
 	var c Connector
-	if err := cli.get(resourceConnector, id, &c); err != nil {
+	if err := cli.get(ctx, resourceConnector, id, &c); err != nil {
 		return storage.Connector{}, err
 	}
 	return toStorageConnector(c), nil
@@ -393,7 +415,7 @@ func (cli *client) GetConnector(ctx context.Context, id string) (storage.Connect
 
 func (cli *client) ListClients(ctx context.Context) (clients []storage.Client, err error) {
 	var clientList ClientList
-	if err = cli.list(resourceClient, &clientList); err != nil {
+	if err = cli.list(ctx, resourceClient, &clientList); err != nil {
 		return nil, fmt.Errorf("failed to list clients: %v", err)
 	}
 	clients = make([]storage.Client, len(clientList.Clients))
@@ -409,7 +431,7 @@ func (cli *client) ListRefreshTokens(ctx context.Context) ([]storage.RefreshToke
 
 func (cli *client) ListPasswords(ctx context.Context) (passwords []storage.Password, err error) {
 	var passwordList PasswordList
-	if err = cli.list(resourcePassword, &passwordList); err != nil {
+	if err = cli.list(ctx, resourcePassword, &passwordList); err != nil {
 		return passwords, fmt.Errorf("failed to list passwords: %v", err)
 	}
 
@@ -422,7 +444,7 @@ func (cli *client) ListPasswords(ctx context.Context) (passwords []storage.Passw
 
 func (cli *client) ListConnectors(ctx context.Context) (connectors []storage.Connector, err error) {
 	var connectorList ConnectorList
-	if err = cli.list(resourceConnector, &connectorList); err != nil {
+	if err = cli.list(ctx, resourceConnector, &connectorList); err != nil {
 		return connectors, fmt.Errorf("failed to list connectors: %v", err)
 	}
 
@@ -435,46 +457,46 @@ func (cli *client) ListConnectors(ctx context.Context) (connectors []storage.Con
 }
 
 func (cli *client) DeleteAuthRequest(ctx context.Context, id string) error {
-	return cli.delete(resourceAuthRequest, id)
+	return cli.delete(ctx, resourceAuthRequest, id)
 }
 
 func (cli *client) DeleteAuthCode(ctx context.Context, code string) error {
-	return cli.delete(resourceAuthCode, code)
+	return cli.delete(ctx, resourceAuthCode, code)
 }
 
 func (cli *client) DeleteClient(ctx context.Context, id string) error {
 	// Check for hash collision.
-	c, err := cli.getClient(id)
+	c, err := cli.getClient(ctx, id)
 	if err != nil {
 		return err
 	}
-	return cli.delete(resourceClient, c.ObjectMeta.Name)
+	return cli.delete(ctx, resourceClient, c.ObjectMeta.Name)
 }
 
 func (cli *client) DeleteRefresh(ctx context.Context, id string) error {
-	return cli.delete(resourceRefreshToken, id)
+	return cli.delete(ctx, resourceRefreshToken, id)
 }
 
 func (cli *client) DeletePassword(ctx context.Context, email string) error {
 	// Check for hash collision.
-	p, err := cli.getPassword(email)
+	p, err := cli.getPassword(ctx, email)
 	if err != nil {
 		return err
 	}
-	return cli.delete(resourcePassword, p.ObjectMeta.Name)
+	return cli.delete(ctx, resourcePassword, p.ObjectMeta.Name)
 }
 
 func (cli *client) DeleteOfflineSessions(ctx context.Context, userID string, connID string) error {
 	// Check for hash collision.
-	o, err := cli.getOfflineSessions(userID, connID)
+	o, err := cli.getOfflineSessions(ctx, userID, connID)
 	if err != nil {
 		return err
 	}
-	return cli.delete(resourceOfflineSessions, o.ObjectMeta.Name)
+	return cli.delete(ctx, resourceOfflineSessions, o.ObjectMeta.Name)
 }
 
 func (cli *client) DeleteConnector(ctx context.Context, id string) error {
-	return cli.delete(resourceConnector, id)
+	return cli.delete(ctx, resourceConnector, id)
 }
 
 func (cli *client) UpdateRefreshToken(ctx context.Context, id string, updater func(old storage.RefreshToken) (storage.RefreshToken, error)) error {
@@ -486,7 +508,7 @@ func (cli *client) UpdateRefreshToken(ctx context.Context, id string, updater fu
 	defer lock.Unlock(id)
 
 	return retryOnConflict(ctx, func() error {
-		r, err := cli.getRefreshToken(id)
+		r, err := cli.getRefreshToken(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -500,12 +522,12 @@ func (cli *client) UpdateRefreshToken(ctx context.Context, id string, updater fu
 		newToken := cli.fromStorageRefreshToken(updated)
 		newToken.ObjectMeta = r.ObjectMeta
 
-		return cli.put(resourceRefreshToken, r.ObjectMeta.Name, newToken)
+		return cli.put(ctx, resourceRefreshToken, r.ObjectMeta.Name, newToken)
 	})
 }
 
 func (cli *client) UpdateClient(ctx context.Context, id string, updater func(old storage.Client) (storage.Client, error)) error {
-	c, err := cli.getClient(id)
+	c, err := cli.getClient(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -518,11 +540,11 @@ func (cli *client) UpdateClient(ctx context.Context, id string, updater func(old
 
 	newClient := cli.fromStorageClient(updated)
 	newClient.ObjectMeta = c.ObjectMeta
-	return cli.put(resourceClient, c.ObjectMeta.Name, newClient)
+	return cli.put(ctx, resourceClient, c.ObjectMeta.Name, newClient)
 }
 
 func (cli *client) UpdatePassword(ctx context.Context, email string, updater func(old storage.Password) (storage.Password, error)) error {
-	p, err := cli.getPassword(email)
+	p, err := cli.getPassword(ctx, email)
 	if err != nil {
 		return err
 	}
@@ -535,12 +557,12 @@ func (cli *client) UpdatePassword(ctx context.Context, email string, updater fun
 
 	newPassword := cli.fromStoragePassword(updated)
 	newPassword.ObjectMeta = p.ObjectMeta
-	return cli.put(resourcePassword, p.ObjectMeta.Name, newPassword)
+	return cli.put(ctx, resourcePassword, p.ObjectMeta.Name, newPassword)
 }
 
 func (cli *client) UpdateOfflineSessions(ctx context.Context, userID string, connID string, updater func(old storage.OfflineSessions) (storage.OfflineSessions, error)) error {
 	return retryOnConflict(ctx, func() error {
-		o, err := cli.getOfflineSessions(userID, connID)
+		o, err := cli.getOfflineSessions(ctx, userID, connID)
 		if err != nil {
 			return err
 		}
@@ -552,14 +574,14 @@ func (cli *client) UpdateOfflineSessions(ctx context.Context, userID string, con
 
 		newOfflineSessions := cli.fromStorageOfflineSessions(updated)
 		newOfflineSessions.ObjectMeta = o.ObjectMeta
-		return cli.put(resourceOfflineSessions, o.ObjectMeta.Name, newOfflineSessions)
+		return cli.put(ctx, resourceOfflineSessions, o.ObjectMeta.Name, newOfflineSessions)
 	})
 }
 
 func (cli *client) UpdateKeys(ctx context.Context, updater func(old storage.Keys) (storage.Keys, error)) error {
 	firstUpdate := false
 	var keys Keys
-	if err := cli.get(resourceKeys, keysName, &keys); err != nil {
+	if err := cli.get(ctx, resourceKeys, keysName, &keys); err != nil {
 		if err != storage.ErrNotFound {
 			return err
 		}
@@ -578,7 +600,7 @@ func (cli *client) UpdateKeys(ctx context.Context, updater func(old storage.Keys
 
 	newKeys := cli.fromStorageKeys(updated)
 	if firstUpdate {
-		err = cli.post(resourceKeys, newKeys)
+		err = cli.post(ctx, resourceKeys, newKeys)
 		if err != nil && errors.Is(err, storage.ErrAlreadyExists) {
 			// We need to tolerate conflicts here in case of HA mode.
 			cli.logger.Debug("Keys creation failed. It is possible that keys have already been created by another dex instance.", "err", err)
@@ -590,7 +612,7 @@ func (cli *client) UpdateKeys(ctx context.Context, updater func(old storage.Keys
 
 	newKeys.ObjectMeta = keys.ObjectMeta
 
-	err = cli.put(resourceKeys, keysName, newKeys)
+	err = cli.put(ctx, resourceKeys, keysName, newKeys)
 	if isKubernetesAPIConflictError(err) {
 		// We need to tolerate conflicts here in case of HA mode.
 		// Dex instances run keys rotation at the same time because they use SigningKey.nextRotation CR field as a trigger.
@@ -603,7 +625,7 @@ func (cli *client) UpdateKeys(ctx context.Context, updater func(old storage.Keys
 
 func (cli *client) UpdateAuthRequest(ctx context.Context, id string, updater func(a storage.AuthRequest) (storage.AuthRequest, error)) error {
 	var req AuthRequest
-	err := cli.get(resourceAuthRequest, id, &req)
+	err := cli.get(ctx, resourceAuthRequest, id, &req)
 	if err != nil {
 		return err
 	}
@@ -615,13 +637,13 @@ func (cli *client) UpdateAuthRequest(ctx context.Context, id string, updater fun
 
 	newReq := cli.fromStorageAuthRequest(updated)
 	newReq.ObjectMeta = req.ObjectMeta
-	return cli.put(resourceAuthRequest, id, newReq)
+	return cli.put(ctx, resourceAuthRequest, id, newReq)
 }
 
 func (cli *client) UpdateConnector(ctx context.Context, id string, updater func(a storage.Connector) (storage.Connector, error)) error {
 	return retryOnConflict(ctx, func() error {
 		var c Connector
-		err := cli.get(resourceConnector, id, &c)
+		err := cli.get(ctx, resourceConnector, id, &c)
 		if err != nil {
 			return err
 		}
@@ -633,20 +655,20 @@ func (cli *client) UpdateConnector(ctx context.Context, id string, updater func(
 
 		newConn := cli.fromStorageConnector(updated)
 		newConn.ObjectMeta = c.ObjectMeta
-		return cli.put(resourceConnector, id, newConn)
+		return cli.put(ctx, resourceConnector, id, newConn)
 	})
 }
 
 func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result storage.GCResult, err error) {
 	var authRequests AuthRequestList
-	if err := cli.listN(resourceAuthRequest, &authRequests, gcResultLimit); err != nil {
+	if err := cli.listN(ctx, resourceAuthRequest, &authRequests, gcResultLimit); err != nil {
 		return result, fmt.Errorf("failed to list auth requests: %v", err)
 	}
 
 	var delErr error
 	for _, authRequest := range authRequests.AuthRequests {
 		if now.After(authRequest.Expiry) {
-			if err := cli.delete(resourceAuthRequest, authRequest.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceAuthRequest, authRequest.ObjectMeta.Name); err != nil {
 				cli.logger.Error("failed to delete auth request", "err", err)
 				delErr = fmt.Errorf("failed to delete auth request: %v", err)
 			}
@@ -658,13 +680,13 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 	}
 
 	var authCodes AuthCodeList
-	if err := cli.listN(resourceAuthCode, &authCodes, gcResultLimit); err != nil {
+	if err := cli.listN(ctx, resourceAuthCode, &authCodes, gcResultLimit); err != nil {
 		return result, fmt.Errorf("failed to list auth codes: %v", err)
 	}
 
 	for _, authCode := range authCodes.AuthCodes {
 		if now.After(authCode.Expiry) {
-			if err := cli.delete(resourceAuthCode, authCode.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceAuthCode, authCode.ObjectMeta.Name); err != nil {
 				cli.logger.Error("failed to delete auth code", "err", err)
 				delErr = fmt.Errorf("failed to delete auth code: %v", err)
 			}
@@ -673,13 +695,13 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 	}
 
 	var deviceRequests DeviceRequestList
-	if err := cli.listN(resourceDeviceRequest, &deviceRequests, gcResultLimit); err != nil {
+	if err := cli.listN(ctx, resourceDeviceRequest, &deviceRequests, gcResultLimit); err != nil {
 		return result, fmt.Errorf("failed to list device requests: %v", err)
 	}
 
 	for _, deviceRequest := range deviceRequests.DeviceRequests {
 		if now.After(deviceRequest.Expiry) {
-			if err := cli.delete(resourceDeviceRequest, deviceRequest.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceDeviceRequest, deviceRequest.ObjectMeta.Name); err != nil {
 				cli.logger.Error("failed to delete device request", "err", err)
 				delErr = fmt.Errorf("failed to delete device request: %v", err)
 			}
@@ -688,13 +710,13 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 	}
 
 	var deviceTokens DeviceTokenList
-	if err := cli.listN(resourceDeviceToken, &deviceTokens, gcResultLimit); err != nil {
+	if err := cli.listN(ctx, resourceDeviceToken, &deviceTokens, gcResultLimit); err != nil {
 		return result, fmt.Errorf("failed to list device tokens: %v", err)
 	}
 
 	for _, deviceToken := range deviceTokens.DeviceTokens {
 		if now.After(deviceToken.Expiry) {
-			if err := cli.delete(resourceDeviceToken, deviceToken.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceDeviceToken, deviceToken.ObjectMeta.Name); err != nil {
 				cli.logger.Error("failed to delete device token", "err", err)
 				delErr = fmt.Errorf("failed to delete device token: %v", err)
 			}
@@ -703,13 +725,13 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 	}
 
 	var authSessions AuthSessionList
-	if err := cli.listN(resourceAuthSession, &authSessions, gcResultLimit); err != nil {
+	if err := cli.listN(ctx, resourceAuthSession, &authSessions, gcResultLimit); err != nil {
 		return result, fmt.Errorf("failed to list auth sessions: %v", err)
 	}
 
 	for _, authSession := range authSessions.AuthSessions {
 		if now.After(authSession.AbsoluteExpiry) || now.After(authSession.IdleExpiry) {
-			if err := cli.delete(resourceAuthSession, authSession.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceAuthSession, authSession.ObjectMeta.Name); err != nil {
 				cli.logger.Error("failed to delete auth session", "err", err)
 				delErr = fmt.Errorf("failed to delete auth session: %v", err)
 			} else {
@@ -725,37 +747,37 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 }
 
 func (cli *client) CreateDeviceRequest(ctx context.Context, d storage.DeviceRequest) error {
-	return cli.post(resourceDeviceRequest, cli.fromStorageDeviceRequest(d))
+	return cli.post(ctx, resourceDeviceRequest, cli.fromStorageDeviceRequest(d))
 }
 
 func (cli *client) GetDeviceRequest(ctx context.Context, userCode string) (storage.DeviceRequest, error) {
 	var req DeviceRequest
-	if err := cli.get(resourceDeviceRequest, strings.ToLower(userCode), &req); err != nil {
+	if err := cli.get(ctx, resourceDeviceRequest, strings.ToLower(userCode), &req); err != nil {
 		return storage.DeviceRequest{}, err
 	}
 	return toStorageDeviceRequest(req), nil
 }
 
 func (cli *client) CreateDeviceToken(ctx context.Context, t storage.DeviceToken) error {
-	return cli.post(resourceDeviceToken, cli.fromStorageDeviceToken(t))
+	return cli.post(ctx, resourceDeviceToken, cli.fromStorageDeviceToken(t))
 }
 
 func (cli *client) GetDeviceToken(ctx context.Context, deviceCode string) (storage.DeviceToken, error) {
 	var token DeviceToken
-	if err := cli.get(resourceDeviceToken, deviceCode, &token); err != nil {
+	if err := cli.get(ctx, resourceDeviceToken, deviceCode, &token); err != nil {
 		return storage.DeviceToken{}, err
 	}
 	return toStorageDeviceToken(token), nil
 }
 
-func (cli *client) getDeviceToken(deviceCode string) (t DeviceToken, err error) {
-	err = cli.get(resourceDeviceToken, deviceCode, &t)
+func (cli *client) getDeviceToken(ctx context.Context, deviceCode string) (t DeviceToken, err error) {
+	err = cli.get(ctx, resourceDeviceToken, deviceCode, &t)
 	return
 }
 
 func (cli *client) UpdateDeviceToken(ctx context.Context, deviceCode string, updater func(old storage.DeviceToken) (storage.DeviceToken, error)) error {
 	return retryOnConflict(ctx, func() error {
-		r, err := cli.getDeviceToken(deviceCode)
+		r, err := cli.getDeviceToken(ctx, deviceCode)
 		if err != nil {
 			return err
 		}
@@ -767,25 +789,25 @@ func (cli *client) UpdateDeviceToken(ctx context.Context, deviceCode string, upd
 
 		newToken := cli.fromStorageDeviceToken(updated)
 		newToken.ObjectMeta = r.ObjectMeta
-		return cli.put(resourceDeviceToken, r.ObjectMeta.Name, newToken)
+		return cli.put(ctx, resourceDeviceToken, r.ObjectMeta.Name, newToken)
 	})
 }
 
 func (cli *client) CreateUserIdentity(ctx context.Context, u storage.UserIdentity) error {
-	return cli.post(resourceUserIdentity, cli.fromStorageUserIdentity(u))
+	return cli.post(ctx, resourceUserIdentity, cli.fromStorageUserIdentity(u))
 }
 
 func (cli *client) GetUserIdentity(ctx context.Context, userID, connectorID string) (storage.UserIdentity, error) {
-	u, err := cli.getUserIdentity(userID, connectorID)
+	u, err := cli.getUserIdentity(ctx, userID, connectorID)
 	if err != nil {
 		return storage.UserIdentity{}, err
 	}
 	return toStorageUserIdentity(u), nil
 }
 
-func (cli *client) getUserIdentity(userID, connectorID string) (u UserIdentity, err error) {
+func (cli *client) getUserIdentity(ctx context.Context, userID, connectorID string) (u UserIdentity, err error) {
 	name := cli.offlineTokenName(userID, connectorID)
-	if err = cli.get(resourceUserIdentity, name, &u); err != nil {
+	if err = cli.get(ctx, resourceUserIdentity, name, &u); err != nil {
 		return UserIdentity{}, err
 	}
 	if userID != u.UserID || connectorID != u.ConnectorID {
@@ -796,7 +818,7 @@ func (cli *client) getUserIdentity(userID, connectorID string) (u UserIdentity, 
 
 func (cli *client) UpdateUserIdentity(ctx context.Context, userID, connectorID string, updater func(old storage.UserIdentity) (storage.UserIdentity, error)) error {
 	return retryOnConflict(ctx, func() error {
-		u, err := cli.getUserIdentity(userID, connectorID)
+		u, err := cli.getUserIdentity(ctx, userID, connectorID)
 		if err != nil {
 			return err
 		}
@@ -808,22 +830,22 @@ func (cli *client) UpdateUserIdentity(ctx context.Context, userID, connectorID s
 
 		newUserIdentity := cli.fromStorageUserIdentity(updated)
 		newUserIdentity.ObjectMeta = u.ObjectMeta
-		return cli.put(resourceUserIdentity, u.ObjectMeta.Name, newUserIdentity)
+		return cli.put(ctx, resourceUserIdentity, u.ObjectMeta.Name, newUserIdentity)
 	})
 }
 
 func (cli *client) DeleteUserIdentity(ctx context.Context, userID, connectorID string) error {
 	// Check for hash collision.
-	u, err := cli.getUserIdentity(userID, connectorID)
+	u, err := cli.getUserIdentity(ctx, userID, connectorID)
 	if err != nil {
 		return err
 	}
-	return cli.delete(resourceUserIdentity, u.ObjectMeta.Name)
+	return cli.delete(ctx, resourceUserIdentity, u.ObjectMeta.Name)
 }
 
 func (cli *client) ListUserIdentities(ctx context.Context) ([]storage.UserIdentity, error) {
 	var userIdentityList UserIdentityList
-	if err := cli.list(resourceUserIdentity, &userIdentityList); err != nil {
+	if err := cli.list(ctx, resourceUserIdentity, &userIdentityList); err != nil {
 		return nil, fmt.Errorf("failed to list user identities: %v", err)
 	}
 
@@ -836,19 +858,19 @@ func (cli *client) ListUserIdentities(ctx context.Context) ([]storage.UserIdenti
 }
 
 func (cli *client) CreateAuthSession(ctx context.Context, s storage.AuthSession) error {
-	return cli.post(resourceAuthSession, cli.fromStorageAuthSession(s))
+	return cli.post(ctx, resourceAuthSession, cli.fromStorageAuthSession(s))
 }
 
-func (cli *client) getAuthSession(id string) (AuthSession, error) {
+func (cli *client) getAuthSession(ctx context.Context, id string) (AuthSession, error) {
 	var s AuthSession
-	if err := cli.get(resourceAuthSession, id, &s); err != nil {
+	if err := cli.get(ctx, resourceAuthSession, id, &s); err != nil {
 		return AuthSession{}, err
 	}
 	return s, nil
 }
 
 func (cli *client) GetAuthSession(ctx context.Context, id string) (storage.AuthSession, error) {
-	s, err := cli.getAuthSession(id)
+	s, err := cli.getAuthSession(ctx, id)
 	if err != nil {
 		return storage.AuthSession{}, err
 	}
@@ -857,7 +879,7 @@ func (cli *client) GetAuthSession(ctx context.Context, id string) (storage.AuthS
 
 func (cli *client) UpdateAuthSession(ctx context.Context, id string, updater func(old storage.AuthSession) (storage.AuthSession, error)) error {
 	return retryOnConflict(ctx, func() error {
-		s, err := cli.getAuthSession(id)
+		s, err := cli.getAuthSession(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -869,13 +891,13 @@ func (cli *client) UpdateAuthSession(ctx context.Context, id string, updater fun
 
 		newSession := cli.fromStorageAuthSession(updated)
 		newSession.ObjectMeta = s.ObjectMeta
-		return cli.put(resourceAuthSession, s.ObjectMeta.Name, newSession)
+		return cli.put(ctx, resourceAuthSession, s.ObjectMeta.Name, newSession)
 	})
 }
 
 func (cli *client) ListAuthSessions(ctx context.Context) ([]storage.AuthSession, error) {
 	var authSessionList AuthSessionList
-	if err := cli.list(resourceAuthSession, &authSessionList); err != nil {
+	if err := cli.list(ctx, resourceAuthSession, &authSessionList); err != nil {
 		return nil, fmt.Errorf("failed to list auth sessions: %v", err)
 	}
 
@@ -888,20 +910,15 @@ func (cli *client) ListAuthSessions(ctx context.Context) ([]storage.AuthSession,
 }
 
 func (cli *client) DeleteAuthSession(ctx context.Context, id string) error {
-	s, err := cli.getAuthSession(id)
+	s, err := cli.getAuthSession(ctx, id)
 	if err != nil {
 		return err
 	}
-	return cli.delete(resourceAuthSession, s.ObjectMeta.Name)
+	return cli.delete(ctx, resourceAuthSession, s.ObjectMeta.Name)
 }
 
 func isKubernetesAPIConflictError(err error) bool {
-	if httpErr, ok := err.(httpError); ok {
-		if httpErr.StatusCode() == http.StatusConflict {
-			return true
-		}
-	}
-	return false
+	return k8serrors.IsConflict(err)
 }
 
 func retryOnConflict(ctx context.Context, action func() error) error {

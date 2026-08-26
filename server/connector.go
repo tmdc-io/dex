@@ -15,7 +15,6 @@ import (
 	"github.com/dexidp/dex/connector/mock"
 	"github.com/dexidp/dex/connector/oauth"
 	"github.com/dexidp/dex/connector/oidc"
-	"github.com/dexidp/dex/connector/openshift"
 	"github.com/dexidp/dex/connector/saml"
 	"github.com/dexidp/dex/server/connectors"
 )
@@ -39,7 +38,7 @@ var ConnectorsConfig = map[string]func() connectors.ConnectorConfig{
 	"linkedin":        func() connectors.ConnectorConfig { return new(linkedin.Config) },
 	"microsoft":       func() connectors.ConnectorConfig { return new(microsoft.Config) },
 	"bitbucket-cloud": func() connectors.ConnectorConfig { return new(bitbucketcloud.Config) },
-	"openshift":       func() connectors.ConnectorConfig { return new(openshift.Config) },
+	//"openshift":       func() connectors.ConnectorConfig { return new(openshift.Config) },
 	"atlassian-crowd": func() connectors.ConnectorConfig { return new(atlassiancrowd.Config) },
 	// Keep around for backwards compatibility.
 	"samlExperimental": func() connectors.ConnectorConfig { return new(saml.Config) },

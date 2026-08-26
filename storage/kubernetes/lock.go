@@ -66,14 +66,14 @@ func (l *refreshTokenLock) Unlock(id string) {
 		return
 	}
 
-	r, err := l.cli.getRefreshToken(id)
+	r, err := l.cli.getRefreshToken(l.cli.ctx, id)
 	if err != nil {
 		l.cli.logger.Debug("failed to get resource to release lock for refresh token", "token_id", id, "err", err)
 		return
 	}
 
 	r.Annotations = nil
-	err = l.cli.put(resourceRefreshToken, r.ObjectMeta.Name, r)
+	err = l.cli.put(l.cli.ctx, resourceRefreshToken, r.ObjectMeta.Name, r)
 	if err != nil {
 		l.cli.logger.Debug("failed to release lock for refresh token", "token_id", id, "err", err)
 	}
@@ -87,7 +87,7 @@ func (l *refreshTokenLock) Unlock(id string) {
 // includes the resource's current resourceVersion, so concurrent writes to the
 // same object result in a 409 Conflict for all but one writer.
 func (l *refreshTokenLock) setLockAnnotation(id string) (bool, error) {
-	r, err := l.cli.getRefreshToken(id)
+	r, err := l.cli.getRefreshToken(l.cli.ctx, id)
 	if err != nil {
 		return false, err
 	}
@@ -104,7 +104,7 @@ func (l *refreshTokenLock) setLockAnnotation(id string) (bool, error) {
 		// the annotation. The put uses the current resourceVersion, so only one
 		// writer succeeds; the rest get a 409 Conflict and go back to polling.
 		r.Annotations = lockData
-		err := l.cli.put(resourceRefreshToken, r.ObjectMeta.Name, r)
+		err := l.cli.put(l.cli.ctx, resourceRefreshToken, r.ObjectMeta.Name, r)
 		if err == nil {
 			l.waitingState = false
 			return false, nil
@@ -133,7 +133,7 @@ func (l *refreshTokenLock) setLockAnnotation(id string) (bool, error) {
 	// can win the compare-and-swap race.
 	r.Annotations = lockData
 
-	err = l.cli.put(resourceRefreshToken, r.ObjectMeta.Name, r)
+	err = l.cli.put(l.cli.ctx, resourceRefreshToken, r.ObjectMeta.Name, r)
 	if err == nil {
 		return false, nil
 	}

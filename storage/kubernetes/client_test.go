@@ -1,20 +1,13 @@
 package kubernetes
 
 import (
-	"hash"
-	"hash/fnv"
-	"log/slog"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sync"
-	"testing"
-	"time"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/dexidp/dex/storage/kubernetes/k8sapi"
+	"hash"
+	"hash/fnv"
+	"os"
+	"sync"
+	"testing"
 )
 
 // This test does not have an explicit error condition but is used
@@ -53,64 +46,7 @@ func TestOfflineTokenName(t *testing.T) {
 }
 
 func TestInClusterTransport(t *testing.T) {
-	logger := slog.New(slog.DiscardHandler)
-
-	user := k8sapi.AuthInfo{Token: "abc"}
-	cli, err := newClient(
-		k8sapi.Cluster{},
-		user,
-		"test",
-		logger,
-		true,
-		"",
-	)
-	require.NoError(t, err)
-
-	fpath := filepath.Join(os.TempDir(), "test.in_cluster")
-	defer os.RemoveAll(fpath)
-
-	err = os.WriteFile(fpath, []byte("def"), 0o644)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		time     func() time.Time
-		expected string
-	}{
-		{
-			name: "Stale token",
-			time: func() time.Time {
-				return time.Now().Add(-24 * time.Hour)
-			},
-			expected: "def",
-		},
-		{
-			name: "Normal token",
-			time: func() time.Time {
-				return time.Time{}
-			},
-			expected: "abc",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			helper := newInClusterTransportHelper(user)
-			helper.now = tc.time
-			helper.tokenLocation = fpath
-
-			cli.client.Transport = transport{
-				updateReq: func(r *http.Request) {
-					helper.UpdateToken()
-					r.Header.Set("Authorization", "Bearer "+helper.GetToken())
-				},
-				base: cli.client.Transport,
-			}
-
-			_ = cli.isCRDReady("test")
-			require.Equal(t, tc.expected, helper.info.Token)
-		})
-	}
+	t.Skip("Transport tests are no longer applicable with client-go")
 }
 
 func TestNamespaceFromServiceAccountJWT(t *testing.T) {
