@@ -133,7 +133,9 @@ func LoadWebConfig(c Config) (http.Handler, http.Handler, http.HandlerFunc, *Tem
 
 	static := http.FileServer(http.FS(staticFiles))
 	theme := http.FileServer(http.FS(themeFiles))
-	robots := func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, string(robotsContent)) }
+	robots := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, string(robotsContent))
+	}
 
 	templates, err := loadTemplates(c, "templates")
 
@@ -147,7 +149,7 @@ func loadTemplates(c Config, templatesDir string) (*Templates, error) {
 		return nil, fmt.Errorf("read dir: %v", err)
 	}
 
-	filenames := []string{}
+	var filenames []string
 	for _, file := range files {
 		if file.IsDir() {
 			continue
@@ -167,7 +169,7 @@ func loadTemplates(c Config, templatesDir string) (*Templates, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse files: %v", err)
 	}
-	missingTmpls := []string{}
+	var missingTmpls []string
 	for _, tmplName := range requiredTmpls {
 		if tmpls.Lookup(tmplName) == nil {
 			missingTmpls = append(missingTmpls, tmplName)
@@ -213,7 +215,7 @@ func relativeURL(serverPath, reqPath, assetPath string) string {
 	}
 
 	splitPath := func(p string) []string {
-		res := []string{}
+		var res []string
 		parts := strings.Split(path.Clean(p), "/")
 		for _, part := range parts {
 			if part != "" {
@@ -224,13 +226,9 @@ func relativeURL(serverPath, reqPath, assetPath string) string {
 	}
 
 	stripCommonParts := func(s1, s2 []string) ([]string, []string) {
-		min := len(s1)
-		if len(s2) < min {
-			min = len(s2)
-		}
-
-		splitIndex := min
-		for i := 0; i < min; i++ {
+		minimum := min(len(s2), len(s1))
+		splitIndex := minimum
+		for i := range minimum {
 			if s1[i] != s2[i] {
 				splitIndex = i
 				break
@@ -350,7 +348,7 @@ func (t *Templates) Password(r *http.Request, w http.ResponseWriter, postURL, la
 }
 
 func (t *Templates) Approval(r *http.Request, w http.ResponseWriter, authReqID, username, clientName string, scopes []string) error {
-	accesses := []string{}
+	var accesses []string
 	for _, scope := range scopes {
 		access, ok := scopeDescriptions[scope]
 		if ok {
@@ -484,7 +482,7 @@ func (w *writeRecorder) Write(p []byte) (n int, err error) {
 	return w.w.Write(p)
 }
 
-func renderTemplate(w http.ResponseWriter, tmpl *template.Template, data interface{}) error {
+func renderTemplate(w http.ResponseWriter, tmpl *template.Template, data any) error {
 	wr := &writeRecorder{w: w}
 	if err := tmpl.Execute(wr, data); err != nil {
 		if !wr.wrote {
