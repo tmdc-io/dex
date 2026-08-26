@@ -204,7 +204,7 @@ bin/kind:
 docker-buildx-push:
 	@echo
 	@echo "=== docker buildx push ==="
-	docker buildx build --sbom=true --provenance=true -t "tmdcio/dex:2.45.1-d1" . --platform linux/amd64 --push
+	docker buildx build --sbom=true --provenance=true -t "tmdcio/dex:2.45.1-d1" --file ./Dockerfile.dataos . --platform linux/amd64 --push
 
 ##@ Clean
 clean: ## Delete all builds and downloaded dependencies.

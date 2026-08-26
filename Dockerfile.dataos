@@ -1,0 +1,55 @@
+FROM golang:1.26 AS builder
+
+ARG TARGETPLATFORM
+
+WORKDIR /usr/local/src/dex
+
+ARG GOPROXY
+
+COPY go.mod go.sum ./
+COPY api/v2/go.mod api/v2/go.sum ./api/v2/
+RUN go mod download
+
+COPY . .
+
+# Propagate Dex version from build args to the build environment
+ARG VERSION
+RUN make release-binary
+
+FROM alpine:3.24.1 AS stager
+
+RUN mkdir -p /var/dex
+RUN mkdir -p /etc/dex
+COPY config.docker.yaml /etc/dex/
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+FROM alpine AS user-setup
+RUN addgroup -g 1001 -S dex && adduser -u 1001 -S -G dex -D -H -s /sbin/nologin dex
+
+FROM tmdcio/alpine:3.23-fips-rfcurated.02 as package
+
+# Dex connectors, such as GitHub and Google logins require root certificates.
+# Proper installations should manage those certificates, but it's a bad user
+# experience when this doesn't work out of the box.
+#
+# See https://go.dev/src/crypto/x509/root_linux.go for Go root CA bundle locations.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Ensure the dex user/group exist before setting ownership or switching to them.
+COPY --from=user-setup /etc/passwd /etc/passwd
+COPY --from=user-setup /etc/group /etc/group
+
+COPY --from=stager --chown=1001:1001 /var/dex /var/dex
+COPY --from=stager --chown=1001:1001 /etc/dex /etc/dex
+
+COPY --from=builder /go/bin/dex /usr/local/bin/dex
+COPY --from=builder /go/bin/docker-entrypoint /usr/local/bin/docker-entrypoint
+COPY --from=builder /usr/local/src/dex/dataos_web /srv/dex/web
+
+USER dex:dex
+
+ENTRYPOINT ["/usr/local/bin/dex"]
+CMD ["dex", "serve", "/etc/dex/config.docker.yaml"]
