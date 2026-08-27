@@ -61,10 +61,10 @@ builds and pushes the image when you push a git tag matching `*-d*`
 
 ### Required GitHub secrets
 
-Configure these repository secrets:
+Configure these repository secrets (same names as the existing Dex image workflows):
 
-- `DOCKER_HUB_USERNAME`
-- `DOCKER_HUB_PASSWORD`
+- `DOCKER_USERNAME`
+- `DOCKER_PASSWORD`
 
 ### Trigger a build
 
