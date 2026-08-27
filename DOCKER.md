@@ -61,10 +61,18 @@ builds and pushes the image when you push a git tag matching `*-d*`
 
 ### Required GitHub secrets
 
-Configure these repository secrets (same names as the existing Dex image workflows):
+This repo does not inherit Docker Hub credentials automatically. Login fails with
+`Username and password required` until these secrets exist **on `tmdc-io/dex`**
+(or the org secrets are granted to this repository):
 
-- `DOCKER_USERNAME`
-- `DOCKER_PASSWORD`
+- `DOCKER_HUB_USERNAME`
+- `DOCKER_HUB_PASSWORD`
+
+`DOCKER_USERNAME` / `DOCKER_PASSWORD` are also accepted as a fallback.
+
+Add them under **Settings → Secrets and variables → Actions**. If they already
+exist as organization secrets (they do on Quickwit), open the org secret and
+add `tmdc-io/dex` to the repository access list. Then re-run the workflow.
 
 ### Trigger a build
 

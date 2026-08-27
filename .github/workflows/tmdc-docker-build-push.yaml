@@ -5,6 +5,12 @@ on:
     tags:
       # e.g. 2.45.1-d1, v2.45.1-d1
       - '*-d*'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to publish (e.g. 2.45.1-d1)
+        required: true
+        type: string
 
 jobs:
   dev-release:
@@ -26,6 +32,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check Docker Hub credentials
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_HUB_USERNAME || secrets.DOCKER_USERNAME }}
+        run: |
+          if [ -z "$DOCKER_USER" ]; then
+            echo "::error::Docker Hub credentials are not available to this repository."
+            echo "Add repository secrets DOCKER_HUB_USERNAME and DOCKER_HUB_PASSWORD"
+            echo "(or DOCKER_USERNAME and DOCKER_PASSWORD) in Settings → Secrets and variables → Actions."
+            echo "If these exist as organization secrets, grant tmdc-io/dex access to them."
+            exit 1
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
@@ -35,11 +62,11 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ secrets.DOCKER_HUB_USERNAME || secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD || secrets.DOCKER_PASSWORD }}
 
       - name: Build Docker image
-        run: make build-tmdc-docker GITHUB_TAGS=${{ github.ref_name }} PLATFORM=linux/amd64
+        run: make build-tmdc-docker GITHUB_TAGS=${{ steps.tag.outputs.value }} PLATFORM=linux/amd64
 
       - name: Push Docker image
-        run: make push-tmdc-docker GITHUB_TAGS=${{ github.ref_name }}
+        run: make push-tmdc-docker GITHUB_TAGS=${{ steps.tag.outputs.value }}
