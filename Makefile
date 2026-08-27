@@ -201,10 +201,31 @@ bin/kind:
 	curl -L https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-$(shell uname | tr A-Z a-z)-amd64 > ./bin/kind
 	@chmod +x ./bin/kind
 
-docker-buildx-push:
-	@echo
-	@echo "=== docker buildx push ==="
-	docker buildx build --sbom=true --provenance=true -t "tmdcio/dex:2.45.1-d1" --file ./Dockerfile.dataos . --platform linux/amd64 --push
+##@ Docker
+
+IMAGE_TAG := $(shell git branch --show-current | tr '\#/' '-')
+PLATFORM ?= linux/amd64
+DOCKER_BUILD_ARGS ?=
+GITHUB_TAGS ?= $(IMAGE_TAG)
+TMDC_IMAGE ?= docker.io/tmdcio/dex
+
+.PHONY: build-tmdc-docker
+build-tmdc-docker: ## Build Dex Docker image for TMDC.
+	@test -n "$(GITHUB_TAGS)" || (echo "GITHUB_TAGS is required" && exit 1)
+	@echo "Building $(TMDC_IMAGE):$(GITHUB_TAGS) for $(PLATFORM)"
+	docker buildx build \
+		--platform $(PLATFORM) \
+		--file ./Dockerfile.dataos \
+		--build-arg VERSION=$(GITHUB_TAGS) \
+		--tag $(TMDC_IMAGE):$(GITHUB_TAGS) \
+		--load \
+		$(DOCKER_BUILD_ARGS) \
+		.
+
+.PHONY: push-tmdc-docker
+push-tmdc-docker: ## Push TMDC Dex Docker image to Docker Hub.
+	@test -n "$(GITHUB_TAGS)" || (echo "GITHUB_TAGS is required" && exit 1)
+	docker push $(TMDC_IMAGE):$(GITHUB_TAGS)
 
 ##@ Clean
 clean: ## Delete all builds and downloaded dependencies.
