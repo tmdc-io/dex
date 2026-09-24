@@ -1,4 +1,4 @@
-FROM golang:1.26 AS builder
+FROM golang:1.27 AS builder
 
 WORKDIR /usr/local/src/dex
 
@@ -27,7 +27,7 @@ ARG TARGETVARIANT
 FROM alpine AS user-setup
 RUN addgroup -g 1001 -S dex && adduser -u 1001 -S -G dex -D -H -s /sbin/nologin dex
 
-FROM tmdcio/alpine:3.24-fips-curated.v4 AS package
+FROM tmdcio/alpine:3.24-fips-curated.v11 AS package
 
 # Dex connectors, such as GitHub and Google logins require root certificates.
 # Proper installations should manage those certificates, but it's a bad user
