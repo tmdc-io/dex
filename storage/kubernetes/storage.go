@@ -668,7 +668,7 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 	var delErr error
 	for _, authRequest := range authRequests.AuthRequests {
 		if now.After(authRequest.Expiry) {
-			if err := cli.delete(ctx, resourceAuthRequest, authRequest.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceAuthRequest, authRequest.ObjectMeta.Name); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				cli.logger.Error("failed to delete auth request", "err", err)
 				delErr = fmt.Errorf("failed to delete auth request: %v", err)
 			}
@@ -686,7 +686,7 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 
 	for _, authCode := range authCodes.AuthCodes {
 		if now.After(authCode.Expiry) {
-			if err := cli.delete(ctx, resourceAuthCode, authCode.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceAuthCode, authCode.ObjectMeta.Name); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				cli.logger.Error("failed to delete auth code", "err", err)
 				delErr = fmt.Errorf("failed to delete auth code: %v", err)
 			}
@@ -701,7 +701,7 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 
 	for _, deviceRequest := range deviceRequests.DeviceRequests {
 		if now.After(deviceRequest.Expiry) {
-			if err := cli.delete(ctx, resourceDeviceRequest, deviceRequest.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceDeviceRequest, deviceRequest.ObjectMeta.Name); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				cli.logger.Error("failed to delete device request", "err", err)
 				delErr = fmt.Errorf("failed to delete device request: %v", err)
 			}
@@ -716,7 +716,7 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 
 	for _, deviceToken := range deviceTokens.DeviceTokens {
 		if now.After(deviceToken.Expiry) {
-			if err := cli.delete(ctx, resourceDeviceToken, deviceToken.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceDeviceToken, deviceToken.ObjectMeta.Name); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				cli.logger.Error("failed to delete device token", "err", err)
 				delErr = fmt.Errorf("failed to delete device token: %v", err)
 			}
@@ -731,7 +731,7 @@ func (cli *client) GarbageCollect(ctx context.Context, now time.Time) (result st
 
 	for _, authSession := range authSessions.AuthSessions {
 		if now.After(authSession.AbsoluteExpiry) || now.After(authSession.IdleExpiry) {
-			if err := cli.delete(ctx, resourceAuthSession, authSession.ObjectMeta.Name); err != nil {
+			if err := cli.delete(ctx, resourceAuthSession, authSession.ObjectMeta.Name); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				cli.logger.Error("failed to delete auth session", "err", err)
 				delErr = fmt.Errorf("failed to delete auth session: %v", err)
 			} else {
