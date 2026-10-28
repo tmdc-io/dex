@@ -48,6 +48,19 @@ type Handler struct {
 	DefaultMFAChain []string
 	// SkipApproval disables the consent screen server-wide (see consent.Satisfied).
 	SkipApproval bool
+
+	// Connector, when set, pins the flow to that single connector: the handler
+	// serves a direct connector issuer, which never offers the selection screen
+	// nor accepts a login through any other connector.
+	Connector string
+	// CallbackURL is the connector callback URL handed to redirect connectors.
+	// Empty means this issuer's own /callback. A direct connector issuer uses the
+	// primary issuer's, which is the redirect URI the connector is registered with.
+	CallbackURL string
+	// DirectIssuerURL resolves the direct issuer of a connector, so the callback
+	// can return a login started on a direct issuer to that issuer. Nil when
+	// direct connector issuers are disabled.
+	DirectIssuerURL func(connectorID string) oauth2.IssuerURL
 }
 
 // Mount registers the login routes. The /auth endpoint is both the entry

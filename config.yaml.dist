@@ -132,6 +132,13 @@ web:
 #   # Uncomment to use a specific connector for password grants
 #   passwordConnector: local
 #
+#   # With DEX_CONNECTOR_DIRECT_ISSUERS=true every connector is additionally served
+#   # as its own issuer at "( path )/( connector id )", e.g.
+#   # https://dex.example.com/dex-direct/microsoft-entra, whose login goes straight
+#   # to that connector. Connectors keep their redirectURI on the main issuer.
+#   # Defaults to the issuer path suffixed with "-direct".
+#   directConnectorIssuerPath: /dex-direct
+#
 #   # PKCE (Proof Key for Code Exchange) configuration
 #   pkce:
 #     # If true, PKCE is required for all authorization code flows (OAuth 2.1).

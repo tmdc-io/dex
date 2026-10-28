@@ -27,4 +27,9 @@ var (
 
 	// APISessionsIdentitiesCRUD allows CRUD operations on auth sessions and user identities through the gRPC API.
 	APISessionsIdentitiesCRUD = newFlag("api_sessions_identities_crud", false)
+
+	// ConnectorDirectIssuers additionally serves every connector as its own issuer under
+	// "( direct issuer path )/( connector id )" (e.g. "/dex-direct/github" for issuer "/dex"),
+	// where the login flow goes straight to that connector instead of the selection screen.
+	ConnectorDirectIssuers = newFlag("connector_direct_issuers", false)
 )

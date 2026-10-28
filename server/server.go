@@ -63,6 +63,15 @@ type Server struct {
 	// backchannel notifies relying parties that a session ended. Shared with the
 	// gRPC API, which ends sessions too.
 	backchannel *backchannel.Notifier
+
+	// direct serves the per-connector direct issuers. Nil when they are disabled,
+	// and on a direct issuer itself.
+	direct *directIssuers
+
+	// connector pins a direct issuer to its connector; empty on the primary
+	// issuer. callbackURL is then the primary issuer's connector callback.
+	connector   string
+	callbackURL string
 }
 
 // Connectors is the server's connector cache. The gRPC API needs it to
@@ -90,11 +99,92 @@ func newServer(ctx context.Context, c Config) (*Server, error) {
 		return nil, err
 	}
 
+	store := newKeyCacher(c.Storage, rc.now)
+	s := assemble(c, rc, store, connectors.NewCache(store, connectors.Resolver(store, c.Logger, ConnectorsConfig)))
+
+	if err := s.openConnectors(ctx, c); err != nil {
+		return nil, err
+	}
+
+	if featureflags.SessionsEnabled.Enabled() {
+		s.logger.InfoContext(ctx, "sessions feature flag is enabled")
+	}
+
+	instrument := instrumentHandler(c.PrometheusRegistry)
+	r := mux.NewRouter().SkipClean(true).UseEncodedPath()
+	r.NotFoundHandler = http.NotFoundHandler()
+	if rc.directIssuerPath != "" {
+		s.direct = &directIssuers{
+			path:    rc.directIssuerPath,
+			primary: s.issuerURL,
+			storage: s.storage,
+			logger:  s.logger,
+			build: func(connectorID string) (*Server, error) {
+				return s.newDirectIssuer(c, instrument, connectorID)
+			},
+		}
+		r.PathPrefix(rc.directIssuerPath + "/").Handler(s.direct)
+		s.logger.InfoContext(ctx, "direct connector issuers enabled", "path", rc.directIssuerPath)
+	}
+	s.mount(router.New(routerConfig(r, s.issuerURL, c, instrument)), c, rc)
+	s.mux = r
+
+	c.Signer.Start(ctx)
+	s.startGarbageCollection(ctx, value(c.GCFrequency, 5*time.Minute), rc.now)
+
+	return s, nil
+}
+
+// newDirectIssuer builds the direct issuer of a connector: a full issuer under
+// the direct issuer path whose login flow is pinned to that connector. It shares
+// the primary issuer's storage, signer, connector cache and metrics; the signer
+// and garbage collection are run by the primary issuer alone.
+func (s *Server) newDirectIssuer(c Config, instrument func(string, http.Handler) http.HandlerFunc, connectorID string) (*Server, error) {
+	issuerURL := s.direct.issuerURL(connectorID)
+	c.Issuer = issuerURL.String()
+	c.DirectConnectorIssuers = false
+	rc, err := normalizeConfig(&c)
+	if err != nil {
+		return nil, err
+	}
+
+	d := assemble(c, rc, s.storage, s.connectors)
+	d.connector = connectorID
+	// Connectors only accept the redirect URI they are registered with, which
+	// is the primary issuer's callback.
+	d.callbackURL = s.issuerURL.AbsURL("/callback")
+
+	r := mux.NewRouter().SkipClean(true).UseEncodedPath()
+	r.NotFoundHandler = http.NotFoundHandler()
+	d.mount(router.New(routerConfig(r, d.issuerURL, c, instrument)), c, rc)
+	d.mux = r
+	return d, nil
+}
+
+// routerConfig is the router.Config of an issuer.
+func routerConfig(r *mux.Router, issuerURL oauth2.IssuerURL, c Config, instrument func(string, http.Handler) http.HandlerFunc) router.Config {
+	return router.Config{
+		Router:       r,
+		IssuerPath:   issuerURL.Path,
+		Headers:      c.Headers,
+		RealIPHeader: c.RealIPHeader,
+		Instrument:   instrument,
+		RealIP:       router.ParseRealIP(c.RealIPHeader, c.TrustedRealIPCIDRs),
+		CORSOrigins:  c.AllowedOrigins,
+		CORSHeaders:  c.AllowedHeaders,
+	}
+}
+
+// assemble builds the issuer-specific parts of a server (sessions, token issuer,
+// back-channel notifier, discovery) on top of the given storage and connector
+// cache. It neither opens connectors nor mounts routes.
+func assemble(c Config, rc resolvedConfig, store storage.Storage, conns *connectors.Cache) *Server {
 	s := &Server{
-		issuerURL: rc.issuerURL,
-		storage:   newKeyCacher(c.Storage, rc.now),
-		templates: rc.templates,
-		logger:    c.Logger,
+		issuerURL:  rc.issuerURL,
+		storage:    store,
+		templates:  rc.templates,
+		logger:     c.Logger,
+		connectors: conns,
 	}
 	s.sessions = &session.Manager{
 		Storage:   s.storage,
@@ -104,7 +194,6 @@ func newServer(ctx context.Context, c Config) (*Server, error) {
 		IssuerURL: s.issuerURL,
 	}
 	s.issuer = tokens.NewIssuer(s.storage, c.Signer, s.issuerURL.URL, rc.idTokensValidFor, rc.now, s.logger)
-	s.connectors = connectors.NewCache(s.storage, connectors.Resolver(s.storage, s.logger, ConnectorsConfig))
 	s.backchannel = &backchannel.Notifier{
 		Storage:   s.storage,
 		Signer:    c.Signer,
@@ -124,33 +213,7 @@ func newServer(ctx context.Context, c Config) (*Server, error) {
 		PKCEMethods:     c.PKCE.CodeChallengeMethodsSupported,
 		SessionsEnabled: c.SessionConfig != nil,
 	}
-
-	if err := s.openConnectors(ctx, c); err != nil {
-		return nil, err
-	}
-
-	if featureflags.SessionsEnabled.Enabled() {
-		s.logger.InfoContext(ctx, "sessions feature flag is enabled")
-	}
-
-	r := mux.NewRouter().SkipClean(true).UseEncodedPath()
-	r.NotFoundHandler = http.NotFoundHandler()
-	s.mount(router.New(router.Config{
-		Router:       r,
-		IssuerPath:   s.issuerURL.Path,
-		Headers:      c.Headers,
-		RealIPHeader: c.RealIPHeader,
-		Instrument:   instrumentHandler(c.PrometheusRegistry),
-		RealIP:       router.ParseRealIP(c.RealIPHeader, c.TrustedRealIPCIDRs),
-		CORSOrigins:  c.AllowedOrigins,
-		CORSHeaders:  c.AllowedHeaders,
-	}), c, rc)
-	s.mux = r
-
-	c.Signer.Start(ctx)
-	s.startGarbageCollection(ctx, value(c.GCFrequency, 5*time.Minute), rc.now)
-
-	return s, nil
+	return s
 }
 
 // openConnectors opens every connector in storage into the cache. Nothing is
@@ -233,6 +296,11 @@ func (s *Server) mount(routes router.Mux, c Config, rc resolvedConfig) {
 	// rest.
 	sessions := s.sessions
 
+	var directIssuerURL func(string) oauth2.IssuerURL
+	if s.direct != nil {
+		directIssuerURL = s.direct.issuerURL
+	}
+
 	for _, h := range []router.Handler{
 		s.discovery,
 		&grants.Handler{
@@ -294,6 +362,9 @@ func (s *Server) mount(routes router.Mux, c Config, rc resolvedConfig) {
 			MFAEnabled:             len(c.MFAProviders) > 0,
 			DefaultMFAChain:        c.DefaultMFAChain,
 			SkipApproval:           c.SkipApprovalScreen,
+			Connector:              s.connector,
+			CallbackURL:            s.callbackURL,
+			DirectIssuerURL:        directIssuerURL,
 		},
 		&mfa.Handler{
 			Storage:         s.storage,

@@ -76,6 +76,10 @@ func (h *Handler) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connectors = conns.Filter(connectors, client.AllowedConnectors)
+	// A direct connector issuer offers only its own connector.
+	if h.Connector != "" {
+		connectors = conns.Filter(connectors, []string{h.Connector})
+	}
 
 	if len(connectors) == 0 {
 		h.renderError(r, w, http.StatusBadRequest, "No connectors available for this client.")
@@ -103,7 +107,9 @@ func (h *Handler) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(connectors) == 1 && !h.AlwaysShowLogin {
+	// A direct connector issuer exists to skip the selection screen, so it never
+	// shows it, even with alwaysShowLoginScreen.
+	if len(connectors) == 1 && (!h.AlwaysShowLogin || h.Connector != "") {
 		connURL.Path = h.IssuerURL.AbsPath("/auth", url.PathEscape(connectors[0].ID))
 		http.Redirect(w, r, connURL.String(), http.StatusFound)
 		return

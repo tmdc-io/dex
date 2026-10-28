@@ -17,15 +17,15 @@ import (
 
 func (h *Handler) handleConnectorCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var authID string
+	var state string
 	switch r.Method {
 	case http.MethodGet: // OAuth2 callback
-		if authID = r.URL.Query().Get("state"); authID == "" {
+		if state = r.URL.Query().Get("state"); state == "" {
 			h.renderError(r, w, http.StatusBadRequest, "User session error.")
 			return
 		}
 	case http.MethodPost: // SAML POST binding
-		if authID = r.PostFormValue("RelayState"); authID == "" {
+		if state = r.PostFormValue("RelayState"); state == "" {
 			h.renderError(r, w, http.StatusBadRequest, "User session error.")
 			return
 		}
@@ -33,6 +33,7 @@ func (h *Handler) handleConnectorCallback(w http.ResponseWriter, r *http.Request
 		h.renderError(r, w, http.StatusBadRequest, "Method not supported")
 		return
 	}
+	authID, direct := parseConnectorState(state)
 
 	authReq, err := h.Storage.GetAuthRequest(ctx, authID)
 	if err != nil {
@@ -53,6 +54,11 @@ func (h *Handler) handleConnectorCallback(w http.ResponseWriter, r *http.Request
 		return
 	} else if connID != "" && connID != authReq.ConnectorID {
 		h.Logger.ErrorContext(r.Context(), "connector mismatch: callback triggered for different connector than authentication start", "authentication_start_connector_id", authReq.ConnectorID, "connector_id", connID)
+		h.renderError(r, w, http.StatusBadRequest, "Requested resource does not exist.")
+		return
+	}
+	if !h.connectorAllowed(authReq.ConnectorID) {
+		h.Logger.ErrorContext(r.Context(), "connector mismatch: callback triggered for a connector this issuer does not serve", "authentication_start_connector_id", authReq.ConnectorID, "connector_id", h.Connector)
 		h.renderError(r, w, http.StatusBadRequest, "Requested resource does not exist.")
 		return
 	}
@@ -110,5 +116,5 @@ func (h *Handler) handleConnectorCallback(w http.ResponseWriter, r *http.Request
 		h.Logger.ErrorContext(ctx, "failed to create/update auth session", "err", err)
 	}
 
-	http.Redirect(w, r, h.buildContinueURL(authReq), http.StatusSeeOther)
+	http.Redirect(w, r, h.buildCallbackContinueURL(authReq, direct), http.StatusSeeOther)
 }

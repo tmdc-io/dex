@@ -135,6 +135,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("sessions config requires sessions to be enabled (DEX_SESSIONS_ENABLED=true)")
 	}
 
+	if c.OAuth2.DirectConnectorIssuerPath != "" && !featureflags.ConnectorDirectIssuers.Enabled() {
+		return fmt.Errorf("oauth2.directConnectorIssuerPath requires direct connector issuers to be enabled (DEX_CONNECTOR_DIRECT_ISSUERS=true)")
+	}
+
 	if err := c.validateMFA(); err != nil {
 		return err
 	}
@@ -260,6 +264,11 @@ type OAuth2 struct {
 	PasswordConnector string `json:"passwordConnector"`
 	// PKCE configuration
 	PKCE PKCE `json:"pkce"`
+	// Path under which every connector is additionally served as its own issuer,
+	// "( path )/( connector id )", skipping the connector selection screen.
+	// Defaults to the issuer path suffixed with "-direct" (e.g. "/dex-direct").
+	// Requires DEX_CONNECTOR_DIRECT_ISSUERS=true feature flag.
+	DirectConnectorIssuerPath string `json:"directConnectorIssuerPath"`
 }
 
 // PKCE holds the PKCE (Proof Key for Code Exchange) configuration.

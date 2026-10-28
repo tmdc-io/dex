@@ -9,7 +9,9 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"sort"
+	"strings"
 	"time"
 
 	gosundheit "github.com/AppsFlyer/go-sundheit"
@@ -104,6 +106,16 @@ type Config struct {
 
 	// DefaultMFAChain is applied to clients that don't specify their own mfaChain.
 	DefaultMFAChain []string
+
+	// If enabled, every connector is additionally served as its own issuer at
+	// "( DirectConnectorIssuerPath )/( connector id )", whose login flow goes
+	// straight to that connector. The issuer itself keeps its selection screen.
+	DirectConnectorIssuers bool
+
+	// DirectConnectorIssuerPath is the path direct connector issuers are served
+	// under. Defaults to the issuer path suffixed with "-direct", e.g. "/dex-direct"
+	// for issuer "https://example.com/dex".
+	DirectConnectorIssuerPath string
 }
 
 // WebConfig holds the server's frontend templates and asset configuration.
@@ -164,6 +176,10 @@ type resolvedConfig struct {
 	static    http.Handler
 	theme     http.Handler
 	robots    http.HandlerFunc
+
+	// directIssuerPath is the path direct connector issuers are served under;
+	// empty when they are disabled.
+	directIssuerPath string
 }
 
 // normalizeConfig validates c and derives everything the server is built from.
@@ -199,6 +215,11 @@ func normalizeConfig(c *Config) (resolvedConfig, error) {
 		return resolvedConfig{}, err
 	}
 
+	directIssuerPath, err := directConnectorIssuerPath(c, issuerURL.Path)
+	if err != nil {
+		return resolvedConfig{}, err
+	}
+
 	static, theme, robots, tmpls, err := templates.LoadWebConfig(webConfig(c))
 	if err != nil {
 		return resolvedConfig{}, fmt.Errorf("server: failed to load web static: %v", err)
@@ -221,7 +242,34 @@ func normalizeConfig(c *Config) (resolvedConfig, error) {
 		static:                 static,
 		theme:                  theme,
 		robots:                 robots,
+		directIssuerPath:       directIssuerPath,
 	}, nil
+}
+
+// directConnectorIssuerPath resolves the path direct connector issuers are
+// served under, or "" when they are disabled.
+func directConnectorIssuerPath(c *Config, issuerPath string) (string, error) {
+	if !c.DirectConnectorIssuers {
+		return "", nil
+	}
+
+	issuerPath = strings.TrimSuffix(issuerPath, "/")
+	p := c.DirectConnectorIssuerPath
+	if p == "" {
+		if issuerPath == "" {
+			p = "/direct"
+		} else {
+			p = issuerPath + "-direct"
+		}
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("server: direct connector issuer path %q must start with \"/\"", p)
+	}
+	p = path.Clean(p)
+	if p == "/" || p == path.Clean("/"+issuerPath) {
+		return "", fmt.Errorf("server: direct connector issuer path %q must differ from the issuer path", p)
+	}
+	return p, nil
 }
 
 // supportedTypes resolves the response types the server accepts and the grant

@@ -45,6 +45,14 @@ func (h *Handler) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A direct connector issuer only serves its own connector.
+	if !h.connectorAllowed(connID) {
+		h.Logger.ErrorContext(r.Context(), "connector not served by this issuer",
+			"connector_id", connID, "issuer_connector_id", h.Connector)
+		h.renderError(r, w, http.StatusNotFound, "Requested resource does not exist")
+		return
+	}
+
 	// Validate that the connector is allowed for this client.
 	client, authErr := h.getClientWithAuthError(ctx, authReq.ClientID)
 	if authErr != nil {
@@ -142,7 +150,7 @@ func (h *Handler) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 	// Include prompt=select_account so that handleAuthorization skips
 	// session-based connector reuse and shows the connector list.
 	backLink := ""
-	if h.Connectors.Len() > 1 {
+	if h.Connectors.Len() > 1 && h.Connector == "" {
 		backLinkParams := make(url.Values)
 		maps.Copy(backLinkParams, r.Form)
 		if h.Sessions.Enabled() {
@@ -162,7 +170,7 @@ func (h *Handler) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 			// Use the auth request ID as the "state" token.
 			//
 			// TODO(ericchiang): Is this appropriate or should we also be using a nonce?
-			callbackURL, connData, err := conn.LoginURL(scopes, h.IssuerURL.AbsURL("/callback"), authReq.ID)
+			callbackURL, connData, err := conn.LoginURL(scopes, h.callbackURL(), h.connectorState(*authReq))
 			if err != nil {
 				h.Logger.ErrorContext(r.Context(), "connector returned error when creating callback", "connector_id", connID, "err", err)
 				h.renderError(r, w, http.StatusInternalServerError, "Login error.")
@@ -215,7 +223,7 @@ func (h *Handler) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 				    document.forms[0].submit();
 				</script>
 			  </body>
-			  </html>`, action, value, authReq.ID)
+			  </html>`, action, value, h.connectorState(*authReq))
 		default:
 			h.renderError(r, w, http.StatusBadRequest, "Requested resource does not exist.")
 		}

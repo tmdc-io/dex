@@ -39,6 +39,13 @@ func (h *Handler) handleContinue(w http.ResponseWriter, r *http.Request) {
 		h.renderError(r, w, http.StatusInternalServerError, "Login process not yet finalized.")
 		return
 	}
+	// A direct connector issuer only completes logins through its own connector.
+	if !h.connectorAllowed(authReq.ConnectorID) {
+		h.Logger.ErrorContext(ctx, "flow dispatcher reached for auth request of a connector this issuer does not serve",
+			"connector_id", authReq.ConnectorID, "issuer_connector_id", h.Connector)
+		h.renderError(r, w, http.StatusBadRequest, "User session error.")
+		return
+	}
 
 	// A step returns with the "continue" verifier (login, MFA) or the "approved"
 	// verifier (consent). The latter proves the user just approved, so consent is

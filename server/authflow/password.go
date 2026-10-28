@@ -46,6 +46,11 @@ func (h *Handler) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		h.renderError(r, w, http.StatusBadRequest, "Requested resource does not exist.")
 		return
 	}
+	if !h.connectorAllowed(authReq.ConnectorID) {
+		h.Logger.ErrorContext(r.Context(), "connector mismatch: password login triggered for a connector this issuer does not serve", "start_connector_id", authReq.ConnectorID, "issuer_connector_id", h.Connector)
+		h.renderError(r, w, http.StatusBadRequest, "Requested resource does not exist.")
+		return
+	}
 
 	conn, err := h.Connectors.Get(ctx, authReq.ConnectorID)
 	if err != nil {

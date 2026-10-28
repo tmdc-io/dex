@@ -305,6 +305,9 @@ func runServe(options serveOptions) error {
 	if featureflags.ContinueOnConnectorFailure.Enabled() {
 		logger.Info("continue on connector failure feature flag enabled")
 	}
+	if featureflags.ConnectorDirectIssuers.Enabled() {
+		logger.Info("connector direct issuers feature flag enabled")
+	}
 
 	// explicitly convert to UTC.
 	now := func() time.Time { return time.Now().UTC() }
@@ -395,6 +398,8 @@ func runServe(options serveOptions) error {
 		IDTokensValidFor:           idTokensValidFor,
 		MFAProviders:               buildMFAProviders(c.MFA.Authenticators, c.Issuer, logger),
 		DefaultMFAChain:            c.MFA.DefaultMFAChain,
+		DirectConnectorIssuers:     featureflags.ConnectorDirectIssuers.Enabled(),
+		DirectConnectorIssuerPath:  c.OAuth2.DirectConnectorIssuerPath,
 	}
 
 	if c.Expiry.AuthRequests != "" {
